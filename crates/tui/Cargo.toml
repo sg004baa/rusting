@@ -1,0 +1,34 @@
+[package]
+name = "rusting-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rusting-core.workspace = true
+rusting-http.workspace = true
+rusting-script.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+nucleo.workspace = true
+ropey.workspace = true
+tree-sitter.workspace = true
+tree-sitter-highlight.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-html.workspace = true
+tokio.workspace = true
+notify.workspace = true
+tempfile.workspace = true
+shell-words.workspace = true
+arboard.workspace = true
+humansize.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true

@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/http",
+    "crates/script",
+    "crates/openapi",
+    "crates/tui",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/sg004baa/rusting"
+
+[workspace.dependencies]
+rusting-core = { path = "crates/core" }
+rusting-http = { path = "crates/http" }
+rusting-openapi = { path = "crates/openapi" }
+rusting-script = { path = "crates/script" }
+rusting-tui = { path = "crates/tui" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+regex = "1"
+directories = "6"
+dotenvy = "0.15"
+notify = "8"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "process",
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "brotli",
+    "gzip",
+    "deflate",
+    "cookies",
+    "stream",
+    "charset",
+    "http2",
+    "json",
+    "multipart",
+    "socks",
+    "system-proxy",
+] }
+diqwest = "3"
+http = "1"
+url = "2"
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+nucleo = "0.5"
+ropey = "1.6"
+tree-sitter = "0.26"
+tree-sitter-highlight = "0.26"
+tree-sitter-json = "0.24"
+tree-sitter-html = "0.23"
+rquickjs = { version = "0.12", features = ["bindgen", "loader"] }
+tempfile = "3"
+shell-words = "1"
+arboard = { version = "3", default-features = false }
+humansize = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

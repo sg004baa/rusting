@@ -1,0 +1,22 @@
+[package]
+name = "rusting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rusting-core.workspace = true
+rusting-openapi.workspace = true
+rusting-tui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+
+[[bin]]
+name = "rusting"
+path = "src/main.rs"
