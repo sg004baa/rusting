@@ -75,7 +75,9 @@ impl Timings {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Phase, PhaseOutcome)> + '_ {
-        Phase::ALL.into_iter().map(|phase| (phase, self.outcome(phase)))
+        Phase::ALL
+            .into_iter()
+            .map(|phase| (phase, self.outcome(phase)))
     }
 
     /// True when nothing has been recorded yet, so the strip stays hidden.
@@ -220,10 +222,7 @@ mod tests {
     #[test]
     fn header_lookup_is_case_insensitive() {
         let response = response_with_content_type(Some("application/json"));
-        assert_eq!(
-            response.header("CONTENT-TYPE"),
-            Some("application/json")
-        );
+        assert_eq!(response.header("CONTENT-TYPE"), Some("application/json"));
         assert_eq!(response.header("missing"), None);
     }
 
@@ -231,7 +230,10 @@ mod tests {
     fn timings_start_empty_and_record_per_phase() {
         let mut timings = Timings::default();
         assert!(timings.is_empty());
-        timings.set(Phase::Dns, PhaseOutcome::Completed(Duration::from_millis(3)));
+        timings.set(
+            Phase::Dns,
+            PhaseOutcome::Completed(Duration::from_millis(3)),
+        );
         assert!(!timings.is_empty());
         assert_eq!(
             timings.outcome(Phase::Dns),
