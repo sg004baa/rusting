@@ -67,7 +67,7 @@ impl Action {
             Self::NewRequest => "ctrl+n",
             Self::ExpandSection => "ctrl+m",
             Self::ToggleCollection => "ctrl+h",
-            Self::SearchRequests => "ctrl+shift+p",
+            Self::SearchRequests => "/",
             Self::Commands => "ctrl+p",
             Self::Jump => "ctrl+o",
             Self::Help => "?",
