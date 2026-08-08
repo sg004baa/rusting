@@ -1,6 +1,6 @@
 //! Six-tab response viewer.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -231,6 +231,15 @@ impl ResponsePane {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ResponsePaneAction {
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            return ResponsePaneAction::LeaveUp;
+        }
+        if key.code == KeyCode::Tab {
+            return ResponsePaneAction::LeaveDown;
+        }
+
         match self.focus {
             PaneFocus::Tabs => self.handle_tab_key(key),
             PaneFocus::Content => self.handle_content_key(key),
@@ -248,11 +257,11 @@ impl ResponsePane {
                 self.move_tab(1);
                 ResponsePaneAction::Consumed
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => {
                 self.focus = PaneFocus::Content;
                 ResponsePaneAction::Consumed
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => ResponsePaneAction::LeaveUp,
+            KeyCode::Up | KeyCode::Char('k') => ResponsePaneAction::LeaveUp,
             _ => ResponsePaneAction::Ignored,
         }
     }
@@ -882,6 +891,29 @@ mod tests {
         assert_eq!(
             pane.handle_key(KeyEvent::new(
                 KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            ResponsePaneAction::Consumed
+        );
+        assert!(!pane.tab_bar_focused());
+    }
+
+    #[test]
+    fn tab_and_backtab_leave_from_tabs_or_content_immediately() {
+        let tab = KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
+        let backtab = KeyEvent::new(KeyCode::BackTab, crossterm::event::KeyModifiers::SHIFT);
+        let down = KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE);
+        let mut pane = ResponsePane::new();
+        assert_eq!(pane.handle_key(tab), ResponsePaneAction::LeaveDown);
+        assert_eq!(pane.handle_key(backtab), ResponsePaneAction::LeaveUp);
+        assert_eq!(pane.handle_key(down), ResponsePaneAction::Consumed);
+        assert!(!pane.tab_bar_focused());
+        assert_eq!(pane.handle_key(tab), ResponsePaneAction::LeaveDown);
+        assert_eq!(pane.handle_key(backtab), ResponsePaneAction::LeaveUp);
+        pane.focus_tab_bar();
+        assert_eq!(
+            pane.handle_key(KeyEvent::new(
+                KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
             )),
             ResponsePaneAction::Consumed

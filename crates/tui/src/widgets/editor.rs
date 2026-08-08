@@ -187,11 +187,11 @@ impl Editor {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let command_mode = self.read_only || self.visual || self.selection().is_some();
 
-        if key.code == KeyCode::F(3) {
+        if key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::ALT {
             self.end_edit_group();
             return EditorAction::OpenInPager;
         }
-        if key.code == KeyCode::F(4) {
+        if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL {
             self.end_edit_group();
             return EditorAction::OpenInEditor;
         }
@@ -207,7 +207,6 @@ impl Editor {
             KeyCode::End => self.move_line_end(shift),
             KeyCode::PageUp => self.move_page(-(self.viewport_height as isize), shift),
             KeyCode::PageDown => self.move_page(self.viewport_height as isize, shift),
-            KeyCode::F(6) => self.select_line(),
             KeyCode::Char('r') if ctrl => return self.redo(),
             KeyCode::Char('f') if ctrl => {
                 self.move_page(self.viewport_height as isize, shift);
@@ -1076,7 +1075,7 @@ mod tests {
         let mut editor = Editor::new();
         editor.set_text("first\nsecond");
         assert_eq!(editor.copy_target(), "first\nsecond");
-        editor.handle_key(key(KeyCode::F(6)));
+        editor.handle_key(key(KeyCode::Char('V')));
         assert_eq!(editor.selected_text().as_deref(), Some("first\n"));
         assert_eq!(editor.copy_target(), "first\n");
     }
@@ -1168,16 +1167,22 @@ mod tests {
     }
 
     #[test]
-    fn external_program_actions_are_reported_to_the_caller() {
+    fn external_program_actions_use_the_configured_defaults_without_function_key_aliases() {
         let mut editor = Editor::new();
         assert_eq!(
-            editor.handle_key(key(KeyCode::F(3))),
+            editor.handle_key(modified(KeyCode::Char('p'), KeyModifiers::ALT)),
             EditorAction::OpenInPager
         );
         assert_eq!(
-            editor.handle_key(key(KeyCode::F(4))),
+            editor.handle_key(modified(KeyCode::Char('e'), KeyModifiers::CONTROL)),
             EditorAction::OpenInEditor
         );
+        for number in [3, 4] {
+            assert_eq!(
+                editor.handle_key(key(KeyCode::F(number))),
+                EditorAction::Ignored
+            );
+        }
     }
 
     #[test]

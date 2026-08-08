@@ -74,6 +74,14 @@ impl OptionsTab {
         })
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.focus = 0;
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.focus = 4;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, _variables: &Variables) -> OptionsAction {
         if key.code == KeyCode::Tab {
             return self.move_down();

@@ -109,7 +109,35 @@ impl AuthTab {
         })
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.focus = Focus::Kind;
+        self.kind.close();
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.kind.close();
+        self.focus = match self.kind.value() {
+            None => Focus::Kind,
+            Some(AuthKind::Basic | AuthKind::Digest) => Focus::Secret,
+            Some(AuthKind::BearerToken) => Focus::First,
+        };
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> AuthAction {
+        if self.focus == Focus::Kind && key.code == KeyCode::Tab {
+            self.kind.close();
+            return if self.kind.value().is_none() {
+                AuthAction::LeaveDown
+            } else {
+                self.focus = Focus::First;
+                AuthAction::Consumed
+            };
+        }
+        if self.focus == Focus::Kind && key.code == KeyCode::BackTab {
+            self.kind.close();
+            return AuthAction::LeaveUp;
+        }
+
         match self.focus {
             Focus::Kind => match self.kind.handle_key(key) {
                 SelectAction::Changed => AuthAction::Changed,

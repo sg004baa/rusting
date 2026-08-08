@@ -177,11 +177,11 @@ pub struct Settings {
     pub watch_collection_files: bool,
     /// Write the open request back to disk after every response.
     pub auto_save_on_response: bool,
-    /// Command used for `f3`. Falls back to `$PAGER`.
+    /// Command used for `alt+p`. Falls back to `$PAGER`.
     pub pager: Option<String>,
-    /// Command used for `f3` on JSON content. Falls back to `pager`.
+    /// Command used for `alt+p` on JSON content. Falls back to `pager`.
     pub pager_json: Option<String>,
-    /// Command used for `f4` and `ctrl+e`. Falls back to `$EDITOR`.
+    /// Command used for `ctrl+e`. Falls back to `$EDITOR`.
     pub editor: Option<String>,
     /// Binding id to comma-separated key list. Replaces the default binding.
     pub keymap: std::collections::BTreeMap<String, String>,

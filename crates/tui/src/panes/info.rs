@@ -66,6 +66,14 @@ impl InfoTab {
         (self.name.value().to_owned(), self.description.text())
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.focus = Focus::Name;
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.focus = Focus::Path;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> InfoAction {
         if key.code == KeyCode::Tab {
             return self.move_down();

@@ -29,15 +29,28 @@ pub struct Toasts {
 
 impl Toasts {
     pub fn push(&mut self, message: impl Into<String>, severity: Severity) {
+        let now = Instant::now();
+        self.discard_expired(now);
+        let message = message.into();
+        if self
+            .items
+            .iter()
+            .any(|toast| toast.message == message && toast.severity == severity)
+        {
+            return;
+        }
         self.items.push(Toast {
-            message: message.into(),
+            message,
             severity,
-            shown_at: Instant::now(),
+            shown_at: now,
         });
     }
 
     pub fn tick(&mut self) {
-        let now = Instant::now();
+        self.discard_expired(Instant::now());
+    }
+
+    fn discard_expired(&mut self, now: Instant) {
         self.items
             .retain(|toast| now.saturating_duration_since(toast.shown_at) < TOAST_LIFETIME);
     }
@@ -102,6 +115,43 @@ mod tests {
         toasts.tick();
         assert_eq!(toasts.items.len(), 1);
         assert_eq!(toasts.items[0].message, "new");
+    }
+
+    #[test]
+    fn live_duplicates_do_not_stack_or_refresh_their_expiry() {
+        let mut toasts = Toasts::default();
+        toasts.push("Collection reloaded", Severity::Information);
+        let original = Instant::now() - Duration::from_secs(4);
+        toasts.items[0].shown_at = original;
+
+        toasts.push("Collection reloaded", Severity::Information);
+
+        assert_eq!(toasts.items.len(), 1);
+        assert_eq!(toasts.items[0].shown_at, original);
+    }
+
+    #[test]
+    fn identical_messages_with_different_severities_are_distinct() {
+        let mut toasts = Toasts::default();
+        toasts.push("request failed", Severity::Warning);
+        toasts.push("request failed", Severity::Error);
+
+        assert_eq!(toasts.items.len(), 2);
+        assert_eq!(toasts.items[0].severity, Severity::Warning);
+        assert_eq!(toasts.items[1].severity, Severity::Error);
+    }
+
+    #[test]
+    fn expired_duplicate_is_discarded_before_a_fresh_toast_is_added() {
+        let mut toasts = Toasts::default();
+        toasts.push("Collection reloaded", Severity::Information);
+        let expired = Instant::now() - TOAST_LIFETIME;
+        toasts.items[0].shown_at = expired;
+
+        toasts.push("Collection reloaded", Severity::Information);
+
+        assert_eq!(toasts.items.len(), 1);
+        assert!(toasts.items[0].shown_at > expired);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -138,6 +138,34 @@ impl RequestPane {
         self.tab_bar_focused = true;
     }
 
+    pub fn focus_body(&mut self) {
+        self.tab_bar_focused = false;
+        match self.active {
+            RequestTab::Headers => self.headers.focus_first_control(),
+            RequestTab::Body => self.body.focus_first_control(),
+            RequestTab::Path => self.path.focus_first_control(),
+            RequestTab::Query => self.query.focus_first_control(),
+            RequestTab::Auth => self.auth.focus_first_control(),
+            RequestTab::Info => self.info.focus_first_control(),
+            RequestTab::Scripts => self.scripts.focus_first_control(),
+            RequestTab::Options => self.options.focus_first_control(),
+        }
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.tab_bar_focused = false;
+        match self.active {
+            RequestTab::Headers => self.headers.focus_last_control(),
+            RequestTab::Body => self.body.focus_last_control(),
+            RequestTab::Path => self.path.focus_last_control(),
+            RequestTab::Query => self.query.focus_last_control(),
+            RequestTab::Auth => self.auth.focus_last_control(),
+            RequestTab::Info => self.info.focus_last_control(),
+            RequestTab::Scripts => self.scripts.focus_last_control(),
+            RequestTab::Options => self.options.focus_last_control(),
+        }
+    }
+
     pub fn load(&mut self, request: &RequestModel) {
         self.headers.load(request);
         self.body.load(request);
@@ -214,6 +242,15 @@ impl RequestPane {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> RequestPaneAction {
+        let key = if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
+            KeyEvent {
+                code: KeyCode::BackTab,
+                ..key
+            }
+        } else {
+            key
+        };
+
         if self.tab_bar_focused {
             return self.handle_tab_key(key);
         }
@@ -268,11 +305,11 @@ impl RequestPane {
                 self.active = RequestTab::ALL[(index + 1) % RequestTab::ALL.len()];
                 RequestPaneAction::Consumed
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => {
-                self.tab_bar_focused = false;
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter | KeyCode::Tab => {
+                self.focus_body();
                 RequestPaneAction::Consumed
             }
-            KeyCode::Up | KeyCode::Char('k') => RequestPaneAction::LeaveUp,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => RequestPaneAction::LeaveUp,
             _ => RequestPaneAction::Ignored,
         }
     }
@@ -516,6 +553,10 @@ fn rewrite_path_parameter(url: &str, old: &str, new: &str) -> String {
 mod tests {
     use super::*;
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
     #[test]
     fn jump_keys_are_stable_after_render() {
         let mut pane = RequestPane::new(PathBuf::from("."));
@@ -551,6 +592,86 @@ mod tests {
             pane.to_model(&request).expect("valid model").headers,
             request.headers
         );
+    }
+
+    #[test]
+    fn headers_tab_enters_key_and_add_tab_leaves_request() {
+        let vars = Variables::new();
+        let base = RequestModel::default();
+        let mut pane = RequestPane::new(PathBuf::from("."));
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Tab), &vars),
+            RequestPaneAction::Consumed
+        );
+        assert!(!pane.tab_bar_focused());
+        for character in "X-Test".chars() {
+            pane.handle_key(key(KeyCode::Char(character)), &vars);
+        }
+        pane.handle_key(key(KeyCode::Tab), &vars);
+        for character in "value".chars() {
+            pane.handle_key(key(KeyCode::Char(character)), &vars);
+        }
+        pane.handle_key(key(KeyCode::Tab), &vars);
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Enter), &vars),
+            RequestPaneAction::Changed
+        );
+        assert_eq!(
+            pane.to_model(&base).expect("valid request").headers,
+            vec![KeyValue::new("X-Test", "value")]
+        );
+        pane.handle_key(key(KeyCode::Tab), &vars);
+        pane.handle_key(key(KeyCode::Tab), &vars);
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Tab), &vars),
+            RequestPaneAction::LeaveDown
+        );
+    }
+
+    #[test]
+    fn every_request_tab_enters_at_its_first_control() {
+        let vars = Variables::new();
+        for tab in RequestTab::ALL {
+            let mut pane = RequestPane::new(PathBuf::from("."));
+            pane.set_active_tab(tab);
+            pane.focus_body();
+            assert_eq!(
+                pane.handle_key(key(KeyCode::BackTab), &vars),
+                RequestPaneAction::Consumed,
+                "{tab:?}"
+            );
+            assert!(pane.tab_bar_focused(), "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn every_request_tab_has_finite_forward_and_backward_traversal() {
+        let vars = Variables::new();
+        for tab in RequestTab::ALL {
+            let mut pane = RequestPane::new(PathBuf::from("."));
+            pane.set_active_tab(tab);
+            pane.focus_body();
+            let mut left_down = false;
+            for _ in 0..8 {
+                if pane.handle_key(key(KeyCode::Tab), &vars) == RequestPaneAction::LeaveDown {
+                    left_down = true;
+                    break;
+                }
+            }
+            assert!(left_down, "{tab:?} swallowed Tab or looped");
+
+            pane.focus_last_control();
+            for _ in 0..8 {
+                if pane.tab_bar_focused() {
+                    break;
+                }
+                let _ = pane.handle_key(key(KeyCode::BackTab), &vars);
+            }
+            assert!(
+                pane.tab_bar_focused(),
+                "{tab:?} swallowed BackTab or looped"
+            );
+        }
     }
 
     #[test]

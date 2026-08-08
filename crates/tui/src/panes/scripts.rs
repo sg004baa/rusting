@@ -82,7 +82,23 @@ impl ScriptsTab {
         }
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.focus = 0;
+        self.close_popup();
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.focus = self.inputs.len() - 1;
+        self.close_popup();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> ScriptsAction {
+        if key.code == KeyCode::Tab {
+            return self.move_down();
+        }
+        if key.code == KeyCode::BackTab {
+            return self.move_up();
+        }
         if self.popup.is_open() {
             match self.popup.handle_key(key) {
                 PopupAction::Accepted(index) => {
@@ -98,25 +114,17 @@ impl ScriptsTab {
             }
         }
 
-        if key.code == KeyCode::F(4)
-            || (key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
+        if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL {
             return self
                 .resolved_path()
                 .map(ScriptsAction::OpenInEditor)
                 .unwrap_or(ScriptsAction::Consumed);
         }
-        if key.code == KeyCode::F(3) {
+        if key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::ALT {
             return self
                 .resolved_path()
                 .map(ScriptsAction::OpenInPager)
                 .unwrap_or(ScriptsAction::Consumed);
-        }
-        if key.code == KeyCode::Tab {
-            return self.move_down();
-        }
-        if key.code == KeyCode::BackTab {
-            return self.move_up();
         }
         if key.code == KeyCode::Down && key.modifiers.is_empty() {
             self.refresh_completion();
@@ -297,6 +305,22 @@ mod tests {
         assert_eq!(
             tab.resolved_path(),
             Some(directory.path().join("scripts/hooks.js"))
+        );
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            ScriptsAction::OpenInEditor(directory.path().join("scripts/hooks.js"))
+        );
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
+            ScriptsAction::OpenInPager(directory.path().join("scripts/hooks.js"))
+        );
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            ScriptsAction::Ignored
+        );
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
+            ScriptsAction::Ignored
         );
     }
 

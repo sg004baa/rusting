@@ -117,8 +117,45 @@ impl KeyValueEditor {
         }
     }
 
+    /// Start traversal at the first editable control rather than the table.
+    /// Existing rows remain available through arrow-key navigation.
+    pub fn focus_first_control(&mut self) {
+        if self.allow_add {
+            if matches!(self.mode, Mode::Idle) {
+                self.mode = Mode::Adding;
+            }
+            self.focus = Focus::Key;
+            self.close_popup();
+        } else if self.table.selected().is_some() {
+            if matches!(self.mode, Mode::Editing { .. }) {
+                self.focus = Focus::Key;
+                self.close_popup();
+            } else {
+                self.begin_editing(true);
+            }
+        } else {
+            self.focus = Focus::Table;
+        }
+    }
+
+    pub fn focus_last_control(&mut self) {
+        if self.allow_add {
+            self.ensure_adding();
+            self.focus = Focus::Button;
+        } else if self.table.selected().is_some() {
+            if matches!(self.mode, Mode::Editing { .. }) {
+                self.focus = Focus::Value;
+            } else {
+                self.begin_editing(false);
+            }
+        } else {
+            self.focus = Focus::Table;
+        }
+        self.close_popup();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> KeyValueAction {
-        if self.popup.is_open() {
+        if self.popup.is_open() && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             match self.popup.handle_key(key) {
                 PopupAction::Accepted(index) => {
                     self.accept_completion(index);
@@ -147,6 +184,21 @@ impl KeyValueEditor {
     }
 
     fn handle_table_key(&mut self, key: KeyEvent) -> KeyValueAction {
+        if key.code == KeyCode::Tab {
+            if self.allow_add {
+                self.begin_adding();
+                return KeyValueAction::Consumed;
+            }
+            if self.table.selected().is_some() {
+                self.begin_editing(true);
+                return KeyValueAction::Consumed;
+            }
+            return KeyValueAction::LeaveDown;
+        }
+        if key.code == KeyCode::BackTab {
+            return KeyValueAction::LeaveUp;
+        }
+
         match self.table.handle_key(key) {
             TableAction::Ignored => KeyValueAction::Ignored,
             TableAction::Consumed => KeyValueAction::Consumed,
@@ -179,27 +231,23 @@ impl KeyValueEditor {
         variables: &Variables,
     ) -> KeyValueAction {
         if key.code == KeyCode::Tab {
-            self.focus = if is_key {
-                Focus::Value
-            } else if self.allow_add {
-                Focus::Button
-            } else {
-                Focus::Key
-            };
             self.close_popup();
-            return KeyValueAction::Consumed;
+            if is_key {
+                self.focus = Focus::Value;
+                return KeyValueAction::Consumed;
+            }
+            if self.allow_add {
+                self.focus = Focus::Button;
+                return KeyValueAction::Consumed;
+            }
+            return KeyValueAction::LeaveDown;
         }
         if key.code == KeyCode::BackTab {
-            self.focus = if is_key {
-                if self.allow_add {
-                    Focus::Button
-                } else {
-                    Focus::Value
-                }
-            } else {
-                Focus::Key
-            };
             self.close_popup();
+            if is_key {
+                return KeyValueAction::LeaveUp;
+            }
+            self.focus = Focus::Key;
             return KeyValueAction::Consumed;
         }
         if key.code == KeyCode::Down && key.modifiers.is_empty() {
@@ -480,11 +528,12 @@ impl KeyValueEditor {
             },
         );
 
+        let button_width = self.add_label.len().max("Update".len()) as u16 + 4;
         let widths = if self.allow_add {
             [
-                Constraint::Percentage(40),
-                Constraint::Percentage(40),
                 Constraint::Fill(1),
+                Constraint::Fill(1),
+                Constraint::Length(button_width),
             ]
         } else {
             [
@@ -598,6 +647,55 @@ mod tests {
             KeyValueAction::Changed
         );
         assert_eq!(editor.rows()[0], KeyValue::new("changed", "again"));
+    }
+
+    #[test]
+    fn tab_traverses_key_value_add_then_leaves() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.focus_first_control();
+        assert_eq!(editor.focus, Focus::Key);
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Tab), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(editor.focus, Focus::Value);
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Tab), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(editor.focus, Focus::Button);
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Tab), &vars),
+            KeyValueAction::LeaveDown
+        );
+        assert_eq!(editor.focus, Focus::Button);
+        assert_eq!(
+            editor.handle_key(key(KeyCode::BackTab), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(editor.focus, Focus::Value);
+    }
+
+    #[test]
+    fn add_button_is_compact_and_commit_returns_to_key() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.focus_first_control();
+        editor.key.set_value("name");
+        editor.value.set_value("value");
+        editor.focus = Focus::Button;
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+        assert_eq!(editor.focus, Focus::Key);
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buffer = Buffer::empty(area);
+        editor.render(area, &mut buffer, true, &vars);
+        assert_eq!(buffer[(70, 7)].symbol(), "╭");
+        assert_eq!(buffer[(79, 7)].symbol(), "╮");
     }
 
     #[test]

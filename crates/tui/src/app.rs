@@ -21,7 +21,7 @@ use crossterm::{
 };
 use ratatui::{
     Frame, Terminal,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -181,6 +181,7 @@ pub struct App {
     event_pause: Arc<AtomicBool>,
     event_paused: Arc<AtomicBool>,
     event_reader_alive: Arc<AtomicBool>,
+    post_external_repaint: bool,
 }
 
 impl App {
@@ -242,6 +243,7 @@ impl App {
             event_pause: Arc::new(AtomicBool::new(false)),
             event_paused: Arc::new(AtomicBool::new(false)),
             event_reader_alive: Arc::new(AtomicBool::new(false)),
+            post_external_repaint: false,
         })
     }
 
@@ -268,6 +270,7 @@ impl App {
                 watcher = self.build_watcher(watch_tx.clone())?;
                 self.watcher_dirty = false;
             }
+            repaint_after_external(&mut terminal, &mut self.post_external_repaint)?;
             terminal
                 .draw(|frame| self.render(frame))
                 .context("could not draw terminal UI")?;
@@ -343,7 +346,7 @@ impl App {
         self.url_bar.render(
             frames.url_bar,
             buffer,
-            matches!(self.focus, Focus::Method | Focus::Url),
+            matches!(self.focus, Focus::Method | Focus::Url | Focus::Send),
             &self.settings,
             self.environment.variables(),
             &self.current.path_params,
@@ -465,7 +468,7 @@ impl App {
                 self.set_focus(self.focus.previous(self.sidebar_visible));
             }
             Focus::Collection => self.handle_collection_key(key),
-            Focus::Method | Focus::Url => {
+            Focus::Method | Focus::Url | Focus::Send => {
                 let consumed = self.handle_url_key(key, finished_tx, progress_tx).await;
                 if !consumed && forward {
                     self.set_focus(self.focus.next(self.sidebar_visible));
@@ -583,14 +586,9 @@ impl App {
         match focus {
             Focus::Method => self.url_bar.focus_method(),
             Focus::Url => self.url_bar.focus_url(),
+            Focus::Send => self.url_bar.focus_send(),
             Focus::RequestTabs => self.request_pane.focus_tab_bar(),
-            Focus::RequestBody => {
-                self.request_pane.focus_tab_bar();
-                let _ = self.request_pane.handle_key(
-                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                    self.environment.variables(),
-                );
-            }
+            Focus::RequestBody => self.request_pane.focus_body(),
             Focus::ResponseTabs => self.response_pane.focus_tab_bar(),
             Focus::ResponseBody => self.response_pane.focus_body(),
             Focus::Collection => {}
@@ -619,7 +617,7 @@ impl App {
                 }
             }
             CollectionAction::SearchRequested => self.open_search_palette(),
-            CollectionAction::LeaveUp => self.set_focus(Focus::ResponseBody),
+            CollectionAction::LeaveUp => self.set_focus(Focus::ResponseTabs),
             CollectionAction::LeaveDown => self.set_focus(Focus::Method),
         }
     }
@@ -660,6 +658,13 @@ impl App {
             .handle_key(key, self.environment.variables());
         let consumed = !matches!(action, RequestPaneAction::Ignored);
         self.handle_request_action(action);
+        if self.focus.request_section() {
+            self.focus = if self.request_pane.tab_bar_focused() {
+                Focus::RequestTabs
+            } else {
+                Focus::RequestBody
+            };
+        }
         consumed
     }
 
@@ -692,7 +697,7 @@ impl App {
                 self.url_bar.focus_url();
                 self.set_focus(Focus::Url);
             }
-            RequestPaneAction::LeaveUp => self.set_focus(Focus::Url),
+            RequestPaneAction::LeaveUp => self.set_focus(Focus::Send),
             RequestPaneAction::LeaveDown => self.set_focus(Focus::ResponseTabs),
         }
     }
@@ -708,7 +713,10 @@ impl App {
             ResponsePaneAction::OpenInEditor(contents, language) => {
                 self.edit_read_only_contents(&contents, language);
             }
-            ResponsePaneAction::LeaveUp => self.set_focus(Focus::RequestBody),
+            ResponsePaneAction::LeaveUp => {
+                self.request_pane.focus_last_control();
+                self.focus = Focus::RequestBody;
+            }
             ResponsePaneAction::LeaveDown => {
                 if self.sidebar_visible {
                     self.set_focus(Focus::Collection);
@@ -716,6 +724,13 @@ impl App {
                     self.set_focus(Focus::Method);
                 }
             }
+        }
+        if self.focus.response_section() {
+            self.focus = if self.response_pane.tab_bar_focused() {
+                Focus::ResponseTabs
+            } else {
+                Focus::ResponseBody
+            };
         }
         consumed
     }
@@ -829,7 +844,10 @@ impl App {
         }
     }
 
-    fn run_external<T>(&self, operation: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    fn run_external<T>(
+        &mut self,
+        operation: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         self.event_pause.store(true, Ordering::Release);
         while self.event_reader_alive.load(Ordering::Acquire)
             && !self.event_paused.load(Ordering::Acquire)
@@ -843,6 +861,7 @@ impl App {
         {
             std::thread::yield_now();
         }
+        self.post_external_repaint = true;
         result
     }
 
@@ -1262,6 +1281,7 @@ impl App {
             Focus::Collection => "Collection",
             Focus::Method => "Method",
             Focus::Url => "URL",
+            Focus::Send => "Send",
             Focus::RequestTabs | Focus::RequestBody => "Request",
             Focus::ResponseTabs | Focus::ResponseBody => "Response",
         };
@@ -1269,6 +1289,7 @@ impl App {
             Focus::Collection => "Browse, open, duplicate, and delete requests in the collection.",
             Focus::Method => "Choose the HTTP method. Mnemonic keys select a method directly.",
             Focus::Url => "Edit the request URL. Variables and :path parameters are highlighted.",
+            Focus::Send => "Send the current request.",
             Focus::RequestTabs | Focus::RequestBody => {
                 "Edit request headers, body, authentication, scripts, and options."
             }
@@ -1700,9 +1721,32 @@ fn restore_terminal_best_effort() {
     let _ = stdout.flush();
 }
 
+fn repaint_after_external<B>(
+    terminal: &mut Terminal<B>,
+    repaint_requested: &mut bool,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+{
+    if !*repaint_requested {
+        return Ok(());
+    }
+    let area: Rect = terminal
+        .size()
+        .context("could not query terminal size before post-external repaint")?
+        .into();
+    terminal
+        .resize(area)
+        .context("could not invalidate terminal buffers after external command")?;
+    *repaint_requested = false;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, buffer::Buffer};
 
     #[test]
     fn path_comparison_accepts_identical_nonexistent_paths() {
@@ -1726,5 +1770,92 @@ mod tests {
         assert_eq!(app.expanded, Some(Section::Response));
         app.toggle_focused_section();
         assert_eq!(app.expanded, None);
+    }
+    #[test]
+    fn external_handoffs_request_repaint_on_success_and_failure() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+
+        app.run_external(|| Ok(())).unwrap();
+        assert!(app.post_external_repaint);
+        assert!(!app.event_pause.load(Ordering::Acquire));
+
+        app.post_external_repaint = false;
+        let result = app.run_external(|| Err::<(), _>(anyhow::anyhow!("child failed")));
+        assert!(result.is_err());
+        assert!(app.post_external_repaint);
+        assert!(!app.event_pause.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn tab_moves_url_send_request_and_response_to_collection() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+
+        app.set_focus(Focus::Url);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Send);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::RequestTabs);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::RequestBody);
+        app.handle_key(backtab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::RequestTabs);
+        app.handle_key(backtab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Send);
+
+        app.set_focus(Focus::ResponseTabs);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Collection);
+        app.sidebar_visible = false;
+        app.set_focus(Focus::ResponseBody);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Method);
+    }
+
+    #[test]
+    fn post_external_resize_forces_unchanged_frame_to_be_repainted() {
+        let backend = TestBackend::new(8, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("restored"), frame.area()))
+            .unwrap();
+
+        terminal.backend_mut().resize(0, 0);
+        terminal.backend_mut().resize(8, 1);
+        assert_eq!(
+            terminal.backend().buffer(),
+            &Buffer::empty(Rect::new(0, 0, 8, 1))
+        );
+
+        let mut repaint_requested = true;
+        repaint_after_external(&mut terminal, &mut repaint_requested).unwrap();
+        assert!(!repaint_requested);
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("restored"), frame.area()))
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer(),
+            &Buffer::with_lines(["restored"])
+        );
     }
 }

@@ -70,10 +70,10 @@ impl Action {
             Self::SearchRequests => "ctrl+shift+p",
             Self::Commands => "ctrl+p",
             Self::Jump => "ctrl+o",
-            Self::Help => "f1",
+            Self::Help => "?",
             Self::Quit => "ctrl+c",
-            Self::OpenInPager => "f3",
-            Self::OpenInEditor => "f4",
+            Self::OpenInPager => "alt+p",
+            Self::OpenInEditor => "ctrl+e",
         }
     }
 
@@ -341,6 +341,29 @@ mod tests {
         assert_eq!(format_key(key), "ctrl+shift+p");
         assert_eq!(format_key(parse_key("alt+enter").unwrap()), "alt+enter");
         assert_eq!(format_key(parse_key("f24").unwrap()), "f24");
+    }
+
+    #[test]
+    fn defaults_use_non_function_keys_for_help_and_external_programs() {
+        let keymap = Keymap::new(&BTreeMap::new()).unwrap();
+        assert_eq!(keymap.display(Action::Help), "?");
+        assert_eq!(keymap.display(Action::OpenInPager), "alt+p");
+        assert_eq!(keymap.display(Action::OpenInEditor), "ctrl+e");
+        assert_eq!(
+            keymap.action_for(parse_key("?").unwrap()),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            keymap.action_for(parse_key("alt+p").unwrap()),
+            Some(Action::OpenInPager)
+        );
+        assert_eq!(
+            keymap.action_for(parse_key("ctrl+e").unwrap()),
+            Some(Action::OpenInEditor)
+        );
+        for old_default in ["f1", "f3", "f4"] {
+            assert_eq!(keymap.action_for(parse_key(old_default).unwrap()), None);
+        }
     }
 
     #[test]

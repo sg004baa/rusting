@@ -81,6 +81,16 @@ impl EditorFooter {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, editor: &mut Editor) -> FooterAction {
+        if self.focus == FooterFocus::Language && key.code == KeyCode::Tab {
+            self.language.close();
+            self.focus = FooterFocus::Wrap;
+            return FooterAction::Consumed;
+        }
+        if self.focus == FooterFocus::Language && key.code == KeyCode::BackTab {
+            self.language.close();
+            return FooterAction::LeaveUp;
+        }
+
         match self.focus {
             FooterFocus::Language => match self.language.handle_key(key) {
                 SelectAction::Changed => {
@@ -90,10 +100,6 @@ impl EditorFooter {
                 SelectAction::Consumed => FooterAction::Consumed,
                 SelectAction::LeaveUp => FooterAction::LeaveUp,
                 SelectAction::LeaveDown => {
-                    self.focus = FooterFocus::Wrap;
-                    FooterAction::Consumed
-                }
-                SelectAction::Ignored if key.code == KeyCode::Tab => {
                     self.focus = FooterFocus::Wrap;
                     FooterAction::Consumed
                 }
@@ -261,7 +267,46 @@ impl BodyTab {
         matches!(self.kind.value(), BodyKind::Form) && self.form.is_editing()
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.focus = Focus::Kind;
+        self.kind.close();
+    }
+
+    pub fn focus_last_control(&mut self) {
+        match self.kind.value() {
+            BodyKind::None => self.focus = Focus::Kind,
+            BodyKind::Raw => {
+                self.focus = Focus::Footer;
+                self.footer.focus = FooterFocus::Wrap;
+            }
+            BodyKind::Form => {
+                self.focus = Focus::Content;
+                self.form.focus_last_control();
+            }
+        }
+        self.kind.close();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> BodyAction {
+        if key.code == KeyCode::Tab && self.focus == Focus::Kind {
+            self.kind.close();
+            return match self.kind.value() {
+                BodyKind::None => BodyAction::LeaveDown,
+                BodyKind::Raw => {
+                    self.focus = Focus::Content;
+                    BodyAction::Consumed
+                }
+                BodyKind::Form => {
+                    self.focus = Focus::Content;
+                    self.form.focus_first_control();
+                    BodyAction::Consumed
+                }
+            };
+        }
+        if key.code == KeyCode::BackTab && self.focus == Focus::Kind {
+            return BodyAction::LeaveUp;
+        }
+
         match self.focus {
             Focus::Kind => match self.kind.handle_key(key) {
                 SelectAction::Changed => BodyAction::Changed,
@@ -290,13 +335,22 @@ impl BodyTab {
     fn handle_content_key(&mut self, key: KeyEvent, variables: &Variables) -> BodyAction {
         match self.kind.value() {
             BodyKind::None => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                     self.focus = Focus::Kind;
                     BodyAction::Consumed
                 }
-                KeyCode::Down | KeyCode::Char('j') => BodyAction::LeaveDown,
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => BodyAction::LeaveDown,
                 _ => BodyAction::Ignored,
             },
+            BodyKind::Raw if key.code == KeyCode::Tab => {
+                self.focus = Focus::Footer;
+                self.footer.focus = FooterFocus::Language;
+                BodyAction::Consumed
+            }
+            BodyKind::Raw if key.code == KeyCode::BackTab => {
+                self.focus = Focus::Kind;
+                BodyAction::Consumed
+            }
             BodyKind::Raw => match self.raw.handle_key(key) {
                 EditorAction::Ignored => BodyAction::Ignored,
                 EditorAction::Consumed => BodyAction::Consumed,
@@ -447,6 +501,10 @@ fn bordered(area: Rect, buffer: &mut Buffer, focused: bool, title: Option<&str>)
 mod tests {
     use super::*;
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
     #[test]
     fn all_body_modes_round_trip() {
         let mut tab = BodyTab::new();
@@ -472,5 +530,57 @@ mod tests {
         tab.load(&form);
         assert_eq!(tab.to_model(), form.body);
         assert!(tab.has_content());
+    }
+
+    #[test]
+    fn raw_body_tabs_kind_content_footer_then_leaves() {
+        let request = RequestModel {
+            body: Some(BodyContent::Raw {
+                content: "{}".into(),
+                content_type: Some("application/json".into()),
+            }),
+            ..RequestModel::default()
+        };
+        let vars = Variables::new();
+        let mut tab = BodyTab::new();
+        tab.load(&request);
+
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(tab.focus, Focus::Content);
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(tab.focus, Focus::Footer);
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &vars),
+            BodyAction::LeaveDown
+        );
+
+        assert_eq!(
+            tab.handle_key(key(KeyCode::BackTab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(
+            tab.handle_key(key(KeyCode::BackTab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(tab.focus, Focus::Content);
+        assert_eq!(
+            tab.handle_key(key(KeyCode::BackTab), &vars),
+            BodyAction::Consumed
+        );
+        assert_eq!(tab.focus, Focus::Kind);
+        assert_eq!(
+            tab.handle_key(key(KeyCode::BackTab), &vars),
+            BodyAction::LeaveUp
+        );
     }
 }

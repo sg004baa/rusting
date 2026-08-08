@@ -3,11 +3,8 @@
 //!
 //! Four rows high. The top three are the bordered control band; the fourth is
 //! the preview line, which shows the value of the variable under the caret so
-//! a `$TOKEN` can be checked without leaving the field.
-//!
-//! The send button is deliberately not focusable. It is a label for `enter`,
-//! not a tab stop — posting made the same call, and a focusable button in a
-//! keyboard-only client is a stop nobody wants to walk through.
+//! a `$TOKEN` can be checked without leaving the field. Method, URL, and Send
+//! are distinct keyboard focus stops.
 
 use std::ops::Range;
 
@@ -55,11 +52,12 @@ pub enum UrlBarAction {
     LeaveDown,
 }
 
-/// Which of the two focusable controls is active.
+/// Which URL-band control is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UrlFocus {
     Method,
     Url,
+    Send,
 }
 
 /// What an accepted completion should replace.
@@ -147,6 +145,12 @@ impl UrlBar {
         self.close_completions();
     }
 
+    pub fn focus_send(&mut self) {
+        self.focus = UrlFocus::Send;
+        self.method.close();
+        self.close_completions();
+    }
+
     /// `scheme://host` candidates gathered from the collection.
     pub fn set_base_url_candidates(&mut self, candidates: Vec<String>) {
         self.base_url_candidates = candidates;
@@ -169,6 +173,11 @@ impl UrlBar {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('j') {
             return UrlBarAction::Send;
         }
+        if self.focus != UrlFocus::Send && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.method.close();
+            self.close_completions();
+            return UrlBarAction::Ignored;
+        }
         if self.popup.is_open() {
             match self.popup.handle_key(key) {
                 PopupAction::Accepted(index) => {
@@ -187,6 +196,13 @@ impl UrlBar {
         match self.focus {
             UrlFocus::Method => self.handle_method_key(key),
             UrlFocus::Url => self.handle_url_key(key, variables),
+            UrlFocus::Send => match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => UrlBarAction::Send,
+                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    UrlBarAction::LeaveDown
+                }
+                _ => UrlBarAction::Ignored,
+            },
         }
     }
 
@@ -352,6 +368,7 @@ impl UrlBar {
 
         let method_focused = focused && self.focus == UrlFocus::Method;
         let url_focused = focused && self.focus == UrlFocus::Url;
+        let send_focused = focused && self.focus == UrlFocus::Send;
 
         self.render_method(layout.method, buffer, method_focused);
         self.render_url(layout.url, buffer, url_focused, variables, path_params);
@@ -361,7 +378,7 @@ impl UrlBar {
         if let Some(rect) = layout.markers {
             self.render_markers(rect, buffer);
         }
-        render_send(layout.send, buffer);
+        render_send(layout.send, buffer, send_focused);
 
         if area.height >= 4 && settings.url_bar.show_value_preview && url_focused {
             let row = Rect::new(area.x, area.y + 3, area.width, 1);
@@ -489,14 +506,13 @@ fn marker_state(outcome: PhaseOutcome) -> MarkerState {
     }
 }
 
-fn render_send(area: Rect, buffer: &mut Buffer) {
+fn render_send(area: Rect, buffer: &mut Buffer, focused: bool) {
     if area.width == 0 {
         return;
     }
-    // Never focusable, so the border is always the unfocused one.
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(theme::border(false));
+        .border_style(theme::border(focused));
     let inner = block.inner(area);
     block.render(area, buffer);
     Line::from(Span::styled(
@@ -799,6 +815,22 @@ mod tests {
     }
 
     #[test]
+    fn tab_closes_url_completion_and_leaves_for_send() {
+        let mut bar = UrlBar::new();
+        bar.set_base_url_candidates(vec!["https://example.com".into()]);
+        assert_eq!(
+            bar.handle_key(key(KeyCode::Down), &Variables::new()),
+            UrlBarAction::Consumed
+        );
+        assert!(bar.popup.is_open());
+        assert_eq!(
+            bar.handle_key(key(KeyCode::Tab), &Variables::new()),
+            UrlBarAction::Ignored
+        );
+        assert!(!bar.popup.is_open());
+    }
+
+    #[test]
     fn ctrl_y_copies_the_url() {
         let mut bar = UrlBar::new();
         bar.set_url("https://example.com");
@@ -917,6 +949,30 @@ mod tests {
             ),
             UrlBarAction::Send
         );
+    }
+
+    #[test]
+    fn focused_send_accepts_enter_and_space_and_tabs_down() {
+        let mut bar = UrlBar::new();
+        bar.focus_send();
+        for code in [KeyCode::Enter, KeyCode::Char(' ')] {
+            assert_eq!(
+                bar.handle_key(key(code), &Variables::new()),
+                UrlBarAction::Send
+            );
+        }
+        assert_eq!(
+            bar.handle_key(key(KeyCode::Tab), &Variables::new()),
+            UrlBarAction::LeaveDown
+        );
+        assert_eq!(
+            bar.handle_key(key(KeyCode::BackTab), &Variables::new()),
+            UrlBarAction::Ignored
+        );
+
+        let buffer = render(&mut bar, &settings(), &Variables::new());
+        assert_eq!(buffer[(50, 0)].style().fg, theme::border(true).fg);
+        assert_ne!(buffer[(50, 0)].style().fg, theme::border(false).fg);
     }
 
     #[test]

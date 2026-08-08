@@ -34,6 +34,14 @@ impl QueryTab {
         self.editor.is_editing()
     }
 
+    pub fn focus_first_control(&mut self) {
+        self.editor.focus_first_control();
+    }
+
+    pub fn focus_last_control(&mut self) {
+        self.editor.focus_last_control();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> KeyValueAction {
         self.editor.handle_key(key, variables)
     }
