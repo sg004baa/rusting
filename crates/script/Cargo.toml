@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 rusting-core.workspace = true
+rusting-http.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 rquickjs.workspace = true

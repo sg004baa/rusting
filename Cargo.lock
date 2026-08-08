@@ -2662,6 +2662,7 @@ dependencies = [
  "anyhow",
  "rquickjs",
  "rusting-core",
+ "rusting-http",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
