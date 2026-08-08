@@ -90,6 +90,28 @@ impl Timings {
     }
 }
 
+/// A timing update emitted while a request is in flight, so the marker strip
+/// fills in live rather than all at once at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseEvent {
+    Started(Phase),
+    Completed(Phase, Duration),
+    Failed(Phase),
+}
+
+impl Timings {
+    /// Folds a live event into the accumulated timings.
+    pub fn apply(&mut self, event: PhaseEvent) {
+        match event {
+            PhaseEvent::Started(phase) => self.set(phase, PhaseOutcome::Started),
+            PhaseEvent::Completed(phase, elapsed) => {
+                self.set(phase, PhaseOutcome::Completed(elapsed));
+            }
+            PhaseEvent::Failed(phase) => self.set(phase, PhaseOutcome::Failed),
+        }
+    }
+}
+
 /// The request exactly as it went on the wire, for the Sent Request tab.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SentRequest {
