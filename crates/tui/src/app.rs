@@ -888,6 +888,21 @@ impl App {
         }
     }
 
+    /// The app writes the open request itself (manual save, auto-save on response),
+    /// and the watcher reports that write. Re-loading byte-identical content would
+    /// clear the response pane and abort an in-flight send, so only genuine external
+    /// edits are applied.
+    fn reopen_if_changed(&mut self, path: &Path) {
+        match load_request(path) {
+            Ok(request) if request != self.current => self.load_model(request),
+            Ok(_) => {}
+            Err(error) => self.toasts.push(
+                format!("Could not reload {}: {error:#}", path.display()),
+                Severity::Error,
+            ),
+        }
+    }
+
     fn load_model(&mut self, request: RequestModel) {
         self.current = request;
         self.url_bar.set_method(self.current.method);
@@ -989,10 +1004,10 @@ impl App {
     }
 
     fn create_request(&mut self, data: NewRequestData, template: Option<RequestModel>) {
-        let directory = if data.directory.trim().is_empty() || data.directory.trim() == "." {
+        let directory = if data.directory == "." {
             self.collection.path.clone()
         } else {
-            self.collection.path.join(data.directory.trim())
+            self.collection.path.join(&data.directory)
         };
         let file_name = files::unique_file_name(&directory, &data.file_name);
         let path = directory.join(file_name);
@@ -1515,7 +1530,7 @@ impl App {
         let mut watcher =
             ::notify::recommended_watcher(move |event: ::notify::Result<::notify::Event>| {
                 match event {
-                    Ok(event) if !event.paths.is_empty() => {
+                    Ok(event) if !event.paths.is_empty() && is_mutation(&event.kind) => {
                         let _ = tx.send(WatchMessage::Changed(event.paths));
                     }
                     Ok(_) => {}
@@ -1577,7 +1592,7 @@ impl App {
                 && paths.iter().any(|path| same_path(path, &open))
                 && open.is_file()
             {
-                self.open_path(&open);
+                self.reopen_if_changed(&open);
             }
             self.toasts
                 .push("Collection reloaded", Severity::Information);
@@ -1592,6 +1607,18 @@ fn same_path(left: &Path, right: &Path) -> bool {
             .ok()
             .zip(right.canonicalize().ok())
             .is_some_and(|(left, right)| left == right)
+}
+
+/// Only real filesystem mutations should trigger a reload. inotify also reports
+/// reads (`EventKind::Access`), and reloading re-reads the collection, which would
+/// feed the watcher its own events forever.
+fn is_mutation(kind: &::notify::EventKind) -> bool {
+    matches!(
+        kind,
+        ::notify::EventKind::Create(_)
+            | ::notify::EventKind::Modify(_)
+            | ::notify::EventKind::Remove(_)
+    )
 }
 
 struct EventThread {
@@ -1755,6 +1782,24 @@ mod tests {
     }
 
     #[test]
+    fn watcher_ignores_read_only_filesystem_events() {
+        use ::notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind, RemoveKind,
+        };
+
+        assert!(is_mutation(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Any
+        ))));
+        assert!(is_mutation(&EventKind::Create(CreateKind::File)));
+        assert!(is_mutation(&EventKind::Remove(RemoveKind::File)));
+        assert!(!is_mutation(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_mutation(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!is_mutation(&EventKind::Any));
+    }
+
+    #[test]
     fn focus_section_expansion_is_reversible() {
         let settings = Settings {
             watch_env_files: false,
@@ -1770,6 +1815,44 @@ mod tests {
         assert_eq!(app.expanded, Some(Section::Response));
         app.toggle_focused_section();
         assert_eq!(app.expanded, None);
+    }
+
+    #[test]
+    fn self_written_request_file_does_not_clear_the_response() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: true,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+
+        let path = root.path().join("probe.posting.yaml");
+        let model = RequestModel {
+            url: "https://example.com/first".to_owned(),
+            path: Some(path.clone()),
+            ..RequestModel::default()
+        };
+        collection::save_request(&model).unwrap();
+        app.open_path(&path);
+        assert_eq!(app.current.url, "https://example.com/first");
+
+        // The app's own save produces a Modify event for byte-identical content.
+        app.send_generation = 7;
+        app.handle_files_changed(vec![path.clone()]);
+        assert_eq!(app.send_generation, 7);
+
+        // A genuine external edit is still picked up.
+        let edited = RequestModel {
+            url: "https://example.com/second".to_owned(),
+            ..app.current.clone()
+        };
+        collection::save_request(&edited).unwrap();
+        app.handle_files_changed(vec![path.clone()]);
+        assert_eq!(app.send_generation, 8);
+        assert_eq!(app.current.url, "https://example.com/second");
     }
     #[test]
     fn external_handoffs_request_repaint_on_success_and_failure() {

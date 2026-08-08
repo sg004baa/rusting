@@ -136,33 +136,28 @@ impl CollectionPane {
         if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
             return CollectionAction::SearchRequested;
         }
-        if key.code == KeyCode::Char('d') && key.modifiers.is_empty() {
-            return self
-                .selected_request()
-                .map(|path| CollectionAction::Duplicate {
-                    path: path.to_path_buf(),
-                    quick: false,
-                })
-                .unwrap_or(CollectionAction::Consumed);
-        }
-        if key.code == KeyCode::Char('D')
-            || (key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::SHIFT))
-        {
-            return self
-                .selected_request()
-                .map(|path| CollectionAction::Duplicate {
-                    path: path.to_path_buf(),
-                    quick: true,
-                })
-                .unwrap_or(CollectionAction::Consumed);
-        }
-        if key.code == KeyCode::Backspace {
-            let confirm = !key.modifiers.contains(KeyModifiers::SHIFT);
+        if matches!(
+            key.code,
+            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Backspace
+        ) {
+            let confirm =
+                key.code != KeyCode::Char('D') && !key.modifiers.contains(KeyModifiers::SHIFT);
             return self
                 .selected_request()
                 .map(|path| CollectionAction::Delete {
                     path: path.to_path_buf(),
                     confirm,
+                })
+                .unwrap_or(CollectionAction::Consumed);
+        }
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            let quick =
+                key.code == KeyCode::Char('Y') || key.modifiers.contains(KeyModifiers::SHIFT);
+            return self
+                .selected_request()
+                .map(|path| CollectionAction::Duplicate {
+                    path: path.to_path_buf(),
+                    quick,
                 })
                 .unwrap_or(CollectionAction::Consumed);
         }
@@ -592,16 +587,16 @@ mod tests {
         let mut pane = CollectionPane::new(&value);
         assert_eq!(
             pane.handle_key(key(KeyCode::Char('d'))),
-            CollectionAction::Duplicate {
+            CollectionAction::Delete {
                 path: path.clone(),
-                quick: false
+                confirm: true
             }
         );
         assert_eq!(
             pane.handle_key(key(KeyCode::Char('D'))),
-            CollectionAction::Duplicate {
+            CollectionAction::Delete {
                 path: path.clone(),
-                quick: true
+                confirm: false
             }
         );
         assert_eq!(
@@ -614,9 +609,20 @@ mod tests {
         assert_eq!(
             pane.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT)),
             CollectionAction::Delete {
-                path,
+                path: path.clone(),
                 confirm: false
             }
+        );
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Char('y'))),
+            CollectionAction::Duplicate {
+                path: path.clone(),
+                quick: false
+            }
+        );
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Char('Y'))),
+            CollectionAction::Duplicate { path, quick: true }
         );
         assert_eq!(
             pane.handle_key(key(KeyCode::Char('/'))),
