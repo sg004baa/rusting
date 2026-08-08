@@ -65,8 +65,6 @@ pub fn validate_file_name(name: &str) -> Result<(), FileNameError> {
 /// Validates the "path in collection" field of the new-request modal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DirectoryError {
-    #[error("Path cannot be empty. Use '.' for the collection root.")]
-    Empty,
     #[error("Path cannot escape the collection root.")]
     Escapes,
     #[error("Path must be relative to the collection root.")]
@@ -75,9 +73,6 @@ pub enum DirectoryError {
 
 pub fn validate_directory(path: &str) -> Result<(), DirectoryError> {
     let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(DirectoryError::Empty);
-    }
     if trimmed.starts_with('/') || trimmed.starts_with('\\') {
         return Err(DirectoryError::Absolute);
     }
@@ -88,6 +83,16 @@ pub fn validate_directory(path: &str) -> Result<(), DirectoryError> {
         return Err(DirectoryError::Escapes);
     }
     Ok(())
+}
+
+/// Normalizes the "path in collection" field: an empty path means the collection root.
+pub fn normalize_directory(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        ".".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// Derives a filename stem from a request title: lowercased, non-alphanumeric
@@ -183,11 +188,18 @@ mod tests {
 
     #[test]
     fn directory_validation() {
-        assert_eq!(validate_directory(""), Err(DirectoryError::Empty));
         assert_eq!(validate_directory("/abs"), Err(DirectoryError::Absolute));
         assert_eq!(validate_directory("a/../b"), Err(DirectoryError::Escapes));
+        assert!(validate_directory("").is_ok());
         assert!(validate_directory(".").is_ok());
         assert!(validate_directory("a/b").is_ok());
+    }
+
+    #[test]
+    fn empty_directory_normalizes_to_collection_root() {
+        assert_eq!(normalize_directory(""), ".");
+        assert_eq!(normalize_directory("  "), ".");
+        assert_eq!(normalize_directory(" api "), "api");
     }
 
     #[test]

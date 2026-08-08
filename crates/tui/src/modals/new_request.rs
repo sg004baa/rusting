@@ -4,7 +4,9 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
-use rusting_core::files::{generate_file_stem, validate_directory, validate_file_name};
+use rusting_core::files::{
+    generate_file_stem, normalize_directory, validate_directory, validate_file_name,
+};
 use rusting_core::model::REQUEST_SUFFIX;
 
 use super::{Modal, ModalResult, centered, control, frame, percent};
@@ -83,7 +85,8 @@ impl NewRequestModal {
         description.set_show_line_numbers(false);
         description.set_text(&initial.description);
 
-        let mut directory_input = Input::with_placeholder("Path relative to collection root");
+        let mut directory_input =
+            Input::with_placeholder("Path relative to collection root (default .)");
         directory_input.set_value(directory.clone());
 
         let mut modal = Self {
@@ -121,7 +124,7 @@ impl NewRequestModal {
         self.data.title = self.title.value().to_owned();
         self.data.file_name = file_name;
         self.data.description = description;
-        self.data.directory = self.directory.value().to_owned();
+        self.data.directory = normalize_directory(self.directory.value());
     }
 
     fn resolved_file_name(&self) -> String {
@@ -441,6 +444,17 @@ mod tests {
             modal.directory_error.as_deref(),
             Some("Path cannot escape the collection root.")
         );
+    }
+
+    #[test]
+    fn empty_directory_defaults_to_collection_root() {
+        let mut modal = NewRequestModal::new(String::new(), None);
+        for character in "Get users".chars() {
+            modal.handle_key(key(KeyCode::Char(character)));
+        }
+        let create = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(modal.handle_key(create), ModalResult::Accepted);
+        assert_eq!(modal.data().directory, ".");
     }
 
     #[test]
