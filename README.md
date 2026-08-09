@@ -104,29 +104,8 @@ whose output lands in the response Scripts tab. A hook is interrupted after 5s.
 
 ## Keybindings
 
-### Global
-
-| Key | Action | Config id |
-| --- | --- | --- |
-| `ctrl+j` | Send request | `send-request` |
-| `ctrl+t` | Focus method | `focus-method` |
-| `ctrl+l` | Focus URL | `focus-url` |
-| `ctrl+s` | Save request | `save-request` |
-| `ctrl+n` | New request | `new-request` |
-| `ctrl+m` | Expand focused section | `expand-section` |
-| `ctrl+h` | Toggle collection browser | `toggle-collection` |
-| `/` | Search requests | `search-requests` |
-| `ctrl+p` | Open command palette | `commands` |
-| `ctrl+o` | Jump to a control | `jump` |
-| `?` | Show help | `help` |
-| `ctrl+c` | Quit rusting | `quit` |
-| `alt+p` | Open in pager | `open-in-pager` |
-| `ctrl+e` | Open in editor | `open-in-editor` |
-
-Any of these can be remapped through the `keymap` map in the config file, keyed by
-the config id above, with a comma-separated key list as the value.
-
-### Collection pane
+Collection-pane keys are fixed; the global bindings and every other setting live
+in [docs/config.md](docs/config.md).
 
 | Key | Action |
 | --- | --- |
@@ -140,47 +119,3 @@ the config id above, with a comma-separated key list as the value.
 | `D` | Delete without confirmation |
 | `y` / `Y` | Duplicate the selected request / duplicate immediately |
 | `ctrl+n` | New request in the selected directory |
-
-## Configuration
-
-The config file is `config.yaml` in the platform config directory; `rusting locate
-config` prints the exact path, and `RUSTING_CONFIG_FILE` overrides it. Every key is
-optional — this is the full set, with defaults:
-
-```yaml
-use_host_environment: false
-watch_env_files: true
-watch_collection_files: true
-auto_save_on_response: false
-pager: null        # falls back to $PAGER
-pager_json: null   # falls back to pager
-editor: null       # falls back to $EDITOR
-keymap: {}         # e.g. send-request: "ctrl+j,f5"
-heading:
-  visible: true
-  show_host: true
-  show_version: true
-  hostname: null
-url_bar:
-  show_value_preview: true
-  hide_secrets_in_value_preview: true
-response:
-  prettify_json: true
-  show_size_and_time: true
-collection_browser:
-  position: left   # left | right
-  show_on_startup: true
-text_input:
-  blinking_cursor: true
-focus:
-  on_startup: collection   # url | method | collection
-  on_response: null        # body | tabs
-  on_request_open: null    # headers | body | query | info | url | method | path
-ssl:
-  ca_bundle: null
-  certificate_path: null
-  key_file: null
-```
-
-Settings are layered, highest first: `RUSTING_*` process environment, then the
-`--env` files in order, then this file, then the built-in defaults.
