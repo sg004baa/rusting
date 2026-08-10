@@ -112,24 +112,45 @@ pub fn path_param_names(url: &str) -> Vec<String> {
 /// `::` to `:`. Placeholders with no supplied value are left as they are.
 pub fn substitute_path_params(url: &str, values: &(impl PathParamLookup + ?Sized)) -> String {
     let (prefix, path, suffix) = split_path(url);
-    let tokens = find_path_params(url);
-    let base = prefix.len();
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(url.len());
+    out.push_str(prefix);
 
-    let mut rebuilt = String::with_capacity(path.len());
     let mut cursor = 0usize;
-    for token in &tokens {
-        let local_start = token.start - base;
-        let local_end = token.end - base;
-        rebuilt.push_str(&path[cursor..local_start]);
-        match values.value_for(&token.name) {
-            Some(value) => rebuilt.push_str(value),
-            None => rebuilt.push_str(&path[local_start..local_end]),
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b':' {
+            index += 1;
+            continue;
         }
-        cursor = local_end;
-    }
-    rebuilt.push_str(&path[cursor..]);
+        if bytes.get(index + 1) == Some(&b':') {
+            out.push_str(&path[cursor..index]);
+            out.push(':');
+            index += 2;
+            cursor = index;
+            continue;
+        }
 
-    format!("{prefix}{}{suffix}", rebuilt.replace("::", ":"))
+        let name_start = index + 1;
+        let mut end = name_start;
+        while end < bytes.len() && is_name_byte(bytes[end], end == name_start) {
+            end += 1;
+        }
+        if end != name_start {
+            if let Some(value) = values.value_for(&path[name_start..end]) {
+                out.push_str(&path[cursor..index]);
+                out.push_str(value);
+                cursor = end;
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+
+    out.push_str(&path[cursor..]);
+    out.push_str(suffix);
+    out
 }
 
 /// Lets both a map and a slice of [`crate::model::PathParam`] drive
@@ -219,6 +240,15 @@ mod tests {
         assert_eq!(
             substitute_path_params("https://a.com/::id/:id", &values),
             "https://a.com/:id/123"
+        );
+    }
+
+    #[test]
+    fn inserted_values_are_not_unescaped() {
+        let values = map(&[("id", "a::b")]);
+        assert_eq!(
+            substitute_path_params("https://a.com/::literal/:id", &values),
+            "https://a.com/:literal/a::b"
         );
     }
 

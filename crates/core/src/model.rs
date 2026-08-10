@@ -254,6 +254,7 @@ pub enum BodyContent {
 
 impl BodyContent {
     pub const FORM_CONTENT_TYPE: &'static str = "application/x-www-form-urlencoded";
+    pub const MULTIPART_CONTENT_TYPE: &'static str = "multipart/form-data";
 
     pub fn content_type(&self) -> Option<&str> {
         match self {
@@ -322,25 +323,37 @@ pub struct ScriptRef {
 }
 
 impl ScriptRef {
-    /// Splits a raw `scripts.*` value. The split is on the *last* colon so
-    /// Windows-style absolute paths and colons inside directory names survive.
+    /// Splits a raw `scripts.*` value on the last colon only when the suffix is
+    /// a valid JavaScript export identifier.
     pub fn parse(raw: &str, hook: ScriptHook) -> Option<Self> {
         let raw = raw.trim();
         if raw.is_empty() {
             return None;
         }
         match raw.rsplit_once(':') {
-            // A single leading drive letter is not a function separator.
-            Some((path, function)) if !function.is_empty() && !path.is_empty() => Some(Self {
-                path: PathBuf::from(path),
-                function: function.to_owned(),
-            }),
+            Some((path, function))
+                if !path.is_empty() && is_javascript_export_identifier(function) =>
+            {
+                Some(Self {
+                    path: PathBuf::from(path),
+                    function: function.to_owned(),
+                })
+            }
             _ => Some(Self {
                 path: PathBuf::from(raw),
                 function: hook.default_function().to_owned(),
             }),
         }
     }
+}
+
+fn is_javascript_export_identifier(identifier: &str) -> bool {
+    let mut bytes = identifier.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first == b'$' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -509,6 +522,49 @@ mod tests {
         let parsed = ScriptRef::parse("a/b.js:prepare", ScriptHook::Setup).unwrap();
         assert_eq!(parsed.path, PathBuf::from("a/b.js"));
         assert_eq!(parsed.function, "prepare");
+    }
+
+    #[test]
+    fn script_ref_keeps_colons_that_do_not_precede_an_export_identifier() {
+        let parsed = ScriptRef::parse(r"C:\scripts\hook.js", ScriptHook::OnRequest).unwrap();
+        assert_eq!(parsed.path, PathBuf::from(r"C:\scripts\hook.js"));
+        assert_eq!(parsed.function, "on_request");
+
+        let parsed = ScriptRef::parse("scripts:archive/hook.js", ScriptHook::Setup).unwrap();
+        assert_eq!(parsed.path, PathBuf::from("scripts:archive/hook.js"));
+        assert_eq!(parsed.function, "setup");
+    }
+
+    #[test]
+    fn script_ref_does_not_split_invalid_export_identifiers() {
+        for raw in ["scripts/hook.js:123handler", "scripts/hook.js:not-valid"] {
+            let parsed = ScriptRef::parse(raw, ScriptHook::Setup).unwrap();
+            assert_eq!(parsed.path, PathBuf::from(raw));
+            assert_eq!(parsed.function, "setup");
+        }
+    }
+
+    #[test]
+    fn script_ref_splits_windows_path_from_valid_export_identifier() {
+        let parsed = ScriptRef::parse(r"C:\scripts\hook.js:on_request", ScriptHook::Setup).unwrap();
+        assert_eq!(parsed.path, PathBuf::from(r"C:\scripts\hook.js"));
+        assert_eq!(parsed.function, "on_request");
+    }
+
+    #[test]
+    fn script_ref_accepts_javascript_identifier_punctuation() {
+        let parsed = ScriptRef::parse("scripts/hook.js:$handler", ScriptHook::Setup).unwrap();
+        assert_eq!(parsed.path, PathBuf::from("scripts/hook.js"));
+        assert_eq!(parsed.function, "$handler");
+    }
+
+    #[test]
+    fn body_content_types_are_distinct() {
+        assert_eq!(
+            BodyContent::FORM_CONTENT_TYPE,
+            "application/x-www-form-urlencoded"
+        );
+        assert_eq!(BodyContent::MULTIPART_CONTENT_TYPE, "multipart/form-data");
     }
 
     #[test]
