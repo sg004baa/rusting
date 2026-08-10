@@ -518,12 +518,7 @@ impl App {
                 self.open_new_request(None, self.collection_pane.target_directory())
             }
             Action::ExpandSection => self.toggle_focused_section(),
-            Action::ToggleCollection => {
-                self.sidebar_visible = !self.sidebar_visible;
-                if !self.sidebar_visible && self.focus == Focus::Collection {
-                    self.set_focus(Focus::Url);
-                }
-            }
+            Action::ToggleCollection => self.toggle_collection_sidebar(),
             Action::SearchRequests => self.open_search_palette(),
             Action::Commands => self.open_command_palette(),
             Action::Jump => self.open_jump(),
@@ -592,6 +587,13 @@ impl App {
             Focus::ResponseTabs => self.response_pane.focus_tab_bar(),
             Focus::ResponseBody => self.response_pane.focus_body(),
             Focus::Collection => {}
+        }
+    }
+
+    fn toggle_collection_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible && self.focus == Focus::Collection {
+            self.set_focus(Focus::Url);
         }
     }
 
@@ -1246,13 +1248,19 @@ impl App {
                 );
             }
             Err(error) => {
-                self.url_bar.set_timings(&self.progress_timings);
-                self.response_pane.set_timings(&self.progress_timings);
+                self.apply_failed_send_state();
                 self.toasts
                     .push(format!("Request failed: {error}"), Severity::Error);
                 self.update_script_output(pending.statuses, pending.logs);
             }
         }
+    }
+
+    fn apply_failed_send_state(&mut self) {
+        self.url_bar.clear_response();
+        self.response_pane.clear();
+        self.url_bar.set_timings(&self.progress_timings);
+        self.response_pane.set_timings(&self.progress_timings);
     }
 
     fn hook_failed(&mut self, status: &HookStatus, label: &str) -> bool {
@@ -1425,9 +1433,7 @@ impl App {
                         CommandChoice::Reset => self.expanded = None,
                         CommandChoice::ExpandRequest => self.expanded = Some(Section::Request),
                         CommandChoice::ExpandResponse => self.expanded = Some(Section::Response),
-                        CommandChoice::ToggleCollection => {
-                            self.sidebar_visible = !self.sidebar_visible;
-                        }
+                        CommandChoice::ToggleCollection => self.toggle_collection_sidebar(),
                         CommandChoice::LoadEnv => self.open_load_env(),
                         CommandChoice::CopyYaml => match self.model_from_ui() {
                             Ok(model) => match rusting_core::yaml::to_string(&model) {
@@ -1815,6 +1821,77 @@ mod tests {
         assert_eq!(app.expanded, Some(Section::Response));
         app.toggle_focused_section();
         assert_eq!(app.expanded, None);
+    }
+
+    #[test]
+    fn command_palette_hiding_collection_repairs_collection_focus() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        app.set_focus(Focus::Collection);
+
+        app.accept_palette(
+            0,
+            PalettePurpose::Commands(vec![CommandChoice::ToggleCollection]),
+        );
+
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.focus, Focus::Url);
+    }
+
+    #[test]
+    fn failed_send_state_clears_the_previous_response_and_status() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let response = Response {
+            status: 200,
+            reason: "OK".to_owned(),
+            url: "https://example.test".to_owned(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: b"old response".to_vec(),
+            timings: Timings::default(),
+            sent: rusting_http::types::SentRequest::default(),
+        };
+        app.url_bar.set_response(response.status, &response.reason);
+        app.response_pane
+            .set_response(&response, &Settings::default());
+        assert!(app.response_pane.has_response());
+
+        app.apply_failed_send_state();
+
+        assert!(!app.response_pane.has_response());
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buffer = Buffer::empty(area);
+        app.url_bar.render(
+            area,
+            &mut buffer,
+            true,
+            &Settings::default(),
+            app.environment.variables(),
+            &[],
+        );
+        let rendered = buffer
+            .content()
+            .iter()
+            .fold(String::new(), |mut rendered, cell| {
+                rendered.push_str(cell.symbol());
+                rendered
+            });
+        assert!(!rendered.contains("200"));
     }
 
     #[test]

@@ -3,8 +3,14 @@
 use std::error::Error as StdError;
 use std::time::{Duration, Instant};
 
-use diqwest::WithDigestAuth;
-use reqwest::header::{CONTENT_TYPE, COOKIE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use bytes::{Bytes, BytesMut};
+use digest_auth::{AuthContext, WwwAuthenticateHeader};
+use futures_util::TryStreamExt;
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName,
+    HeaderValue, LOCATION, PROXY_AUTHORIZATION, REFERER, TRANSFER_ENCODING, USER_AGENT,
+    WWW_AUTHENTICATE,
+};
 use rusting_core::{
     AuthKind, BodyContent, KeyValue, RequestModel, config::SslSettings, model::RUSTING_VERSION,
 };
@@ -28,6 +34,7 @@ pub async fn send(
 ) -> Result<Response, SendError> {
     let timeout = client::validated_timeout(request.options.timeout)?;
     let http_client = client::build(request, settings)?;
+    let using_proxy = !request.options.proxy_url.is_empty();
     let mut url = Url::parse(&request.url)
         .map_err(|error| SendError::InvalidRequest(format!("invalid URL: {error}")))?;
     let mut parameters = request.enabled_params().peekable();
@@ -49,25 +56,17 @@ pub async fn send(
         );
     }
 
-    let body = encoded_body(request);
-    if !request.has_explicit_content_type()
-        && let Some(content_type) = request.body.as_ref().and_then(BodyContent::content_type)
+    let materialized = materialize_body(request.body.as_ref()).await?;
+    let body = materialized.as_ref().map(|body| body.bytes.clone());
+    if let Some(materialized) = &materialized
+        && (materialized.force_content_type || !request.has_explicit_content_type())
+        && let Some(content_type) = &materialized.content_type
     {
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_str(content_type).map_err(|error| {
-                SendError::InvalidRequest(format!("invalid body content type: {error}"))
-            })?,
-        );
+        headers.insert(CONTENT_TYPE, content_type.clone());
     }
 
-    let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())
+    let mut method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())
         .map_err(|error| SendError::InvalidRequest(format!("invalid HTTP method: {error}")))?;
-    let mut builder = http_client.request(method, url).headers(headers);
-    if let Some(body) = body {
-        builder = builder.body(body);
-    }
-
     let digest_credentials = match request.auth.as_ref().and_then(|auth| auth.kind) {
         Some(AuthKind::Basic) => {
             let auth = request
@@ -79,7 +78,13 @@ pub async fn send(
                         "Basic auth is selected but has no credentials".into(),
                     )
                 })?;
-            builder = builder.basic_auth(&auth.username, Some(&auth.password));
+            let seed = http_client
+                .request(method.clone(), url.clone())
+                .headers(headers)
+                .basic_auth(&auth.username, Some(&auth.password))
+                .build()
+                .map_err(|error| classify_reqwest(error, timeout, using_proxy))?;
+            headers = seed.headers().clone();
             None
         }
         Some(AuthKind::BearerToken) => {
@@ -90,7 +95,13 @@ pub async fn send(
                 .ok_or_else(|| {
                     SendError::InvalidRequest("Bearer auth is selected but has no token".into())
                 })?;
-            builder = builder.bearer_auth(&auth.token);
+            let seed = http_client
+                .request(method.clone(), url.clone())
+                .headers(headers)
+                .bearer_auth(&auth.token)
+                .build()
+                .map_err(|error| classify_reqwest(error, timeout, using_proxy))?;
+            headers = seed.headers().clone();
             None
         }
         Some(AuthKind::Digest) => {
@@ -108,13 +119,6 @@ pub async fn send(
         None => None,
     };
 
-    let snapshot = builder
-        .try_clone()
-        .ok_or_else(|| SendError::InvalidRequest("request body could not be replayed".into()))?
-        .build()
-        .map_err(|error| classify_reqwest(error, timeout, false))?;
-    let sent = snapshot_request(&snapshot);
-
     // A fresh reqwest client guarantees a fresh connection. reqwest does not
     // expose connector milestones, so Connect is the supported aggregate from
     // dispatch through response headers; DNS and TLS remain honestly Skipped.
@@ -122,19 +126,90 @@ pub async fn send(
     let mut timing = Recorder::new(progress);
     timing.start(Phase::Connect);
     timing.start(Phase::TimeToFirstByte);
-    let response_result = if let Some(credentials) = digest_credentials {
-        builder
-            .send_digest_auth(credentials)
-            .await
-            .map_err(|error| classify_digest(error, timeout, !request.options.proxy_url.is_empty()))
-    } else {
-        builder.send().await.map_err(|error| {
-            classify_reqwest(error, timeout, !request.options.proxy_url.is_empty())
-        })
-    };
+    let exchange: Result<_, SendError> = async {
+        let mut body = body;
+        let mut redirect_count = 0_usize;
+        let mut digest_retry_sent = false;
 
-    let response = match response_result {
-        Ok(response) => response,
+        loop {
+            let mut builder = http_client
+                .request(method.clone(), url.clone())
+                .headers(headers.clone());
+            if let Some(body) = &body {
+                builder = builder.body(body.clone());
+            }
+            let attempt = builder
+                .build()
+                .map_err(|error| classify_reqwest(error, timeout, using_proxy))?;
+            let sent = snapshot_request(&attempt);
+            let response = http_client
+                .execute(attempt)
+                .await
+                .map_err(|error| classify_reqwest(error, timeout, using_proxy))?;
+
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                && let Some((username, password)) = digest_credentials
+                && !digest_retry_sent
+                && let Some(mut challenge) = digest_challenge(response.headers())?
+            {
+                let uri = digest_uri(&url);
+                let context = AuthContext::new_with_method(
+                    username,
+                    password,
+                    uri,
+                    body.as_deref(),
+                    method.as_str().into(),
+                );
+                let authorization = challenge.respond(&context).map_err(classify_digest)?;
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&authorization.to_string()).map_err(|error| {
+                        SendError::InvalidRequest(format!(
+                            "digest authentication produced an invalid Authorization header: {error}"
+                        ))
+                    })?,
+                );
+                digest_retry_sent = true;
+                continue;
+            }
+
+            if !request.options.follow_redirects {
+                break Ok((response, sent));
+            }
+            let Some(next_url) = redirect_target(&response, &url)? else {
+                break Ok((response, sent));
+            };
+            if redirect_count >= 10 {
+                return Err(SendError::InvalidRequest("too many redirects".into()));
+            }
+            redirect_count += 1;
+
+            remove_sensitive_headers(&mut headers, &url, &next_url);
+            set_redirect_referer(&mut headers, &url, &next_url);
+            if digest_credentials.is_some() {
+                headers.remove(AUTHORIZATION);
+            }
+            digest_retry_sent = false;
+
+            let drop_body = match response.status() {
+                reqwest::StatusCode::MOVED_PERMANENTLY | reqwest::StatusCode::FOUND => {
+                    method == reqwest::Method::POST
+                }
+                reqwest::StatusCode::SEE_OTHER => method != reqwest::Method::HEAD,
+                _ => false,
+            };
+            if drop_body {
+                method = reqwest::Method::GET;
+                body = None;
+                remove_payload_headers(&mut headers);
+            }
+            url = next_url;
+        }
+    }
+    .await;
+
+    let (response, sent) = match exchange {
+        Ok(exchange) => exchange,
         Err(error) => {
             timing.fail(Phase::Connect);
             timing.fail(Phase::TimeToFirstByte);
@@ -160,11 +235,7 @@ pub async fn send(
         Ok(body) => body.to_vec(),
         Err(error) => {
             timing.fail(Phase::Download);
-            return Err(classify_reqwest(
-                error,
-                timeout,
-                !request.options.proxy_url.is_empty(),
-            ));
+            return Err(classify_reqwest(error, timeout, using_proxy));
         }
     };
     timing.complete(Phase::Download, download_started);
@@ -224,17 +295,196 @@ fn attach_cookies(
     Ok(())
 }
 
-fn encoded_body(request: &RequestModel) -> Option<Vec<u8>> {
-    match request.body.as_ref()? {
-        BodyContent::Raw { content, .. } => Some(content.as_bytes().to_vec()),
-        BodyContent::Form { form_data, .. } => {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            for item in form_data.iter().filter(|item| item.enabled) {
-                serializer.append_pair(&item.name, &item.value);
+struct MaterializedBody {
+    bytes: Bytes,
+    content_type: Option<HeaderValue>,
+    force_content_type: bool,
+}
+
+async fn materialize_body(
+    body: Option<&BodyContent>,
+) -> Result<Option<MaterializedBody>, SendError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    match body {
+        BodyContent::Raw {
+            content,
+            content_type,
+        } => Ok(Some(MaterializedBody {
+            bytes: Bytes::copy_from_slice(content.as_bytes()),
+            content_type: optional_content_type(content_type.as_deref())?,
+            force_content_type: false,
+        })),
+        BodyContent::Form {
+            form_data,
+            content_type,
+        } => {
+            let content_type = content_type.as_deref().ok_or_else(|| {
+                SendError::InvalidRequest(
+                    "Form body requires application/x-www-form-urlencoded or multipart/form-data"
+                        .into(),
+                )
+            })?;
+            let encoding = content_type
+                .split_once(';')
+                .map_or(content_type, |(encoding, _)| encoding)
+                .trim();
+            if encoding.eq_ignore_ascii_case(BodyContent::FORM_CONTENT_TYPE) {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                for item in form_data.iter().filter(|item| item.enabled) {
+                    serializer.append_pair(&item.name, &item.value);
+                }
+                return Ok(Some(MaterializedBody {
+                    bytes: Bytes::from(serializer.finish()),
+                    content_type: optional_content_type(Some(content_type))?,
+                    force_content_type: false,
+                }));
             }
-            Some(serializer.finish().into_bytes())
+            if encoding.eq_ignore_ascii_case(BodyContent::MULTIPART_CONTENT_TYPE) {
+                let mut form = reqwest::multipart::Form::new();
+                for item in form_data.iter().filter(|item| item.enabled) {
+                    form = form.text(item.name.clone(), item.value.clone());
+                }
+                let content_type = HeaderValue::from_str(&format!(
+                    "{}; boundary={}",
+                    BodyContent::MULTIPART_CONTENT_TYPE,
+                    form.boundary()
+                ))
+                .map_err(|error| {
+                    SendError::InvalidRequest(format!(
+                        "invalid generated multipart content type: {error}"
+                    ))
+                })?;
+                let chunks: Vec<Bytes> =
+                    form.into_stream().try_collect().await.map_err(|error| {
+                        SendError::InvalidRequest(format!(
+                            "multipart body serialization failed: {error}"
+                        ))
+                    })?;
+                let length = chunks.iter().map(Bytes::len).sum();
+                let mut bytes = BytesMut::with_capacity(length);
+                for chunk in chunks {
+                    bytes.extend_from_slice(&chunk);
+                }
+                return Ok(Some(MaterializedBody {
+                    bytes: bytes.freeze(),
+                    content_type: Some(content_type),
+                    force_content_type: true,
+                }));
+            }
+            Err(SendError::InvalidRequest(format!(
+                "unsupported Form content type {content_type:?}; expected {} or {}",
+                BodyContent::FORM_CONTENT_TYPE,
+                BodyContent::MULTIPART_CONTENT_TYPE
+            )))
         }
     }
+}
+
+fn optional_content_type(content_type: Option<&str>) -> Result<Option<HeaderValue>, SendError> {
+    content_type
+        .map(|content_type| {
+            HeaderValue::from_str(content_type).map_err(|error| {
+                SendError::InvalidRequest(format!("invalid body content type: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn redirect_target(
+    response: &reqwest::Response,
+    current_url: &Url,
+) -> Result<Option<Url>, SendError> {
+    if !matches!(
+        response.status(),
+        reqwest::StatusCode::MOVED_PERMANENTLY
+            | reqwest::StatusCode::FOUND
+            | reqwest::StatusCode::SEE_OTHER
+            | reqwest::StatusCode::TEMPORARY_REDIRECT
+            | reqwest::StatusCode::PERMANENT_REDIRECT
+    ) {
+        return Ok(None);
+    }
+    let Some(location) = response.headers().get(LOCATION) else {
+        return Ok(None);
+    };
+    let location = location.to_str().map_err(|error| {
+        SendError::InvalidRequest(format!("redirect Location is not valid text: {error}"))
+    })?;
+    let next = current_url.join(location).map_err(|error| {
+        SendError::InvalidRequest(format!("invalid redirect Location {location:?}: {error}"))
+    })?;
+    if next.scheme() != "http" && next.scheme() != "https" {
+        return Err(SendError::InvalidRequest(format!(
+            "redirect URL has unsupported scheme {:?}",
+            next.scheme()
+        )));
+    }
+    Ok(Some(next))
+}
+
+fn remove_sensitive_headers(headers: &mut HeaderMap, previous: &Url, next: &Url) {
+    if previous.scheme() == next.scheme()
+        && previous.host_str() == next.host_str()
+        && previous.port_or_known_default() == next.port_or_known_default()
+    {
+        return;
+    }
+    headers.remove(AUTHORIZATION);
+    headers.remove(COOKIE);
+    headers.remove("cookie2");
+    headers.remove(PROXY_AUTHORIZATION);
+    headers.remove(WWW_AUTHENTICATE);
+}
+
+fn set_redirect_referer(headers: &mut HeaderMap, previous: &Url, next: &Url) {
+    headers.remove(REFERER);
+    if previous.scheme() == "https" && next.scheme() == "http" {
+        return;
+    }
+    let mut referer = previous.clone();
+    let _ = referer.set_username("");
+    let _ = referer.set_password(None);
+    referer.set_fragment(None);
+    if let Ok(value) = HeaderValue::from_str(referer.as_str()) {
+        headers.insert(REFERER, value);
+    }
+}
+
+fn remove_payload_headers(headers: &mut HeaderMap) {
+    headers.remove(CONTENT_ENCODING);
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(CONTENT_TYPE);
+    headers.remove(TRANSFER_ENCODING);
+}
+
+fn digest_challenge(headers: &HeaderMap) -> Result<Option<WwwAuthenticateHeader>, SendError> {
+    for value in headers.get_all(WWW_AUTHENTICATE).iter() {
+        let value = value.to_str().map_err(|error| {
+            SendError::InvalidRequest(format!(
+                "digest WWW-Authenticate header is not valid text: {error}"
+            ))
+        })?;
+        let value = value.trim_start();
+        if value
+            .as_bytes()
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"digest"))
+        {
+            return digest_auth::parse(value).map(Some).map_err(classify_digest);
+        }
+    }
+    Ok(None)
+}
+
+fn digest_uri(url: &Url) -> String {
+    let mut uri = url.path().to_owned();
+    if let Some(query) = url.query() {
+        uri.push('?');
+        uri.push_str(query);
+    }
+    uri
 }
 
 fn snapshot_request(request: &reqwest::Request) -> SentRequest {
@@ -258,26 +508,8 @@ fn convert_headers(headers: &HeaderMap) -> Vec<KeyValue> {
         .collect()
 }
 
-fn classify_digest(
-    error: diqwest::error::Error,
-    timeout: Duration,
-    using_proxy: bool,
-) -> SendError {
-    let message = error.to_string();
-    match error {
-        diqwest::error::Error::Reqwest(error) => classify_reqwest(error, timeout, using_proxy),
-        diqwest::error::Error::MissingHost
-        | diqwest::error::Error::RequestBuilderNotCloneable
-        | diqwest::error::Error::InvalidHeaderValue(_)
-        | diqwest::error::Error::ToStr(_) => {
-            SendError::InvalidRequest(format!("digest authentication failed: {message}"))
-        }
-        diqwest::error::Error::DigestAuth(_)
-        | diqwest::error::Error::AuthHeaderMissing
-        | diqwest::error::Error::LockPoisoned => {
-            SendError::Other(format!("digest authentication failed: {message}"))
-        }
-    }
+fn classify_digest(error: digest_auth::Error) -> SendError {
+    SendError::Other(format!("digest authentication failed: {error}"))
 }
 
 fn classify_reqwest(error: reqwest::Error, timeout: Duration, using_proxy: bool) -> SendError {
@@ -386,6 +618,13 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+    fn wire_header<'a>(wire: &'a str, expected_name: &str) -> Option<&'a str> {
+        wire.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(expected_name)
+                .then(|| value.trim())
+        })
     }
 
     fn request(url: String) -> RequestModel {
@@ -518,6 +757,18 @@ mod tests {
             })
             .expect("digest Authorization header");
         assert!(authorization.contains("username=\"user\""));
+        let sent_authorization = response
+            .sent
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("authorization"))
+            .expect("recorded Digest Authorization header");
+        assert_eq!(
+            sent_authorization.value,
+            authorization["Authorization: ".len()..]
+        );
+        assert_eq!(response.sent.method, "GET");
+        assert_eq!(response.sent.url, format!("{}/digest", local.url));
         assert_eq!(response.body, b"authenticated");
     }
 
@@ -542,6 +793,86 @@ mod tests {
         assert!(wire.ends_with("\r\n\r\na=two+words"));
         assert!(lower.contains("content-type: application/custom\r\n"));
         assert!(!lower.contains(BodyContent::FORM_CONTENT_TYPE));
+    }
+    #[tokio::test]
+    async fn multipart_uses_a_matching_boundary_and_replays_on_307() {
+        let local = server(vec![
+            (
+                Duration::ZERO,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /uploaded\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            ),
+            (Duration::ZERO, ok("uploaded")),
+        ])
+        .await;
+        let mut disabled = KeyValue::new("skip", "me");
+        disabled.enabled = false;
+        let mut model = request(format!("{}/upload", local.url));
+        model.method = HttpMethod::Post;
+        model.headers = vec![KeyValue::new("Content-Type", "application/custom")];
+        model.body = Some(BodyContent::Form {
+            form_data: vec![KeyValue::new("alpha", "two words"), disabled],
+            content_type: Some(BodyContent::MULTIPART_CONTENT_TYPE.into()),
+        });
+
+        let response = send(&model, &SslSettings::default(), &[], None)
+            .await
+            .expect("send multipart form through preserving redirect");
+        let requests = local.requests.await.expect("server task");
+        let first_content_type =
+            wire_header(&requests[0], "content-type").expect("first Content-Type");
+        let second_content_type =
+            wire_header(&requests[1], "content-type").expect("second Content-Type");
+        assert_eq!(first_content_type, second_content_type);
+        let boundary = first_content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .expect("multipart boundary");
+        let first_body = requests[0]
+            .split_once("\r\n\r\n")
+            .expect("first request body")
+            .1;
+        let second_body = requests[1]
+            .split_once("\r\n\r\n")
+            .expect("second request body")
+            .1;
+        assert_eq!(first_body, second_body);
+        assert!(first_body.starts_with(&format!("--{boundary}\r\n")));
+        assert!(
+            first_body
+                .contains("Content-Disposition: form-data; name=\"alpha\"\r\n\r\ntwo words\r\n")
+        );
+        assert!(first_body.ends_with(&format!("--{boundary}--\r\n")));
+        assert!(!first_body.contains("skip"));
+        assert_eq!(response.sent.method, "POST");
+        assert_eq!(response.sent.url, format!("{}/uploaded", local.url));
+        assert_eq!(response.sent.body.as_deref(), Some(second_body));
+        assert_eq!(
+            response
+                .sent
+                .headers
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+                .map(|header| header.value.as_str()),
+            Some(second_content_type)
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_form_content_type_fails_before_dispatch() {
+        let mut model = request("http://127.0.0.1:9/form".into());
+        model.method = HttpMethod::Post;
+        model.body = Some(BodyContent::Form {
+            form_data: vec![KeyValue::new("a", "b")],
+            content_type: Some("application/custom".into()),
+        });
+
+        let error = send(&model, &SslSettings::default(), &[], None)
+            .await
+            .expect_err("unsupported Form encoding");
+        assert!(matches!(
+            error,
+            SendError::InvalidRequest(message)
+                if message.contains("unsupported Form content type")
+        ));
     }
 
     #[tokio::test]
@@ -596,6 +927,130 @@ mod tests {
             .expect("do not follow redirect");
         assert_eq!(response.status, 302);
         redirect.requests.await.expect("redirect task");
+    }
+    #[tokio::test]
+    async fn post_302_records_the_final_get_and_preserves_same_origin_credentials() {
+        let local = server(vec![
+            (
+                Duration::ZERO,
+                "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            ),
+            (Duration::ZERO, ok("final")),
+        ])
+        .await;
+        let mut model = request(format!("{}/start", local.url));
+        model.method = HttpMethod::Post;
+        model.headers = vec![
+            KeyValue::new("Authorization", "Bearer same-origin"),
+            KeyValue::new("Cookie", "safe=yes"),
+            KeyValue::new("Content-Encoding", "identity"),
+            KeyValue::new("Content-Length", "7"),
+        ];
+        model.body = Some(BodyContent::Raw {
+            content: "payload".into(),
+            content_type: Some("text/plain".into()),
+        });
+
+        let response = send(&model, &SslSettings::default(), &[], None)
+            .await
+            .expect("follow POST redirect");
+        let requests = local.requests.await.expect("server task");
+        let final_wire = requests[1].to_ascii_lowercase();
+        assert!(requests[0].starts_with("POST /start "));
+        assert!(requests[1].starts_with("GET /final "));
+        assert!(final_wire.contains("authorization: bearer same-origin\r\n"));
+        assert!(final_wire.contains("cookie: safe=yes\r\n"));
+        assert!(!final_wire.contains("content-encoding:"));
+        assert!(!final_wire.contains("content-length:"));
+        assert!(!final_wire.contains("content-type:"));
+        assert!(requests[1].ends_with("\r\n\r\n"));
+        assert_eq!(response.sent.method, "GET");
+        assert_eq!(response.sent.url, format!("{}/final", local.url));
+        assert_eq!(response.sent.body, None);
+        assert!(
+            response
+                .sent
+                .headers
+                .iter()
+                .any(|header| header.name.eq_ignore_ascii_case("authorization")
+                    && header.value == "Bearer same-origin")
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirect_strips_sensitive_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_address = listener.local_addr().expect("target address");
+        let target = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept redirect target");
+            let request = read_request(&mut stream).await;
+            stream
+                .write_all(ok("final").as_bytes())
+                .await
+                .expect("write final");
+            request
+        });
+        let redirect = server(vec![(
+            Duration::ZERO,
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        )])
+        .await;
+        let mut model = request(format!("{}/start", redirect.url));
+        model.headers = vec![
+            KeyValue::new("Authorization", "Bearer secret"),
+            KeyValue::new("Cookie", "secret=yes"),
+            KeyValue::new("Proxy-Authorization", "Basic c2VjcmV0"),
+            KeyValue::new("WWW-Authenticate", "private"),
+        ];
+
+        let response = send(&model, &SslSettings::default(), &[], None)
+            .await
+            .expect("follow cross-origin redirect");
+        let target_wire = target.await.expect("target task");
+        redirect.requests.await.expect("redirect task");
+        let target_headers = target_wire
+            .split_once("\r\n\r\n")
+            .expect("target request headers")
+            .0
+            .to_ascii_lowercase();
+        assert!(!target_headers.contains("authorization:"));
+        assert!(!target_headers.contains("cookie:"));
+        assert!(!target_headers.contains("proxy-authorization:"));
+        assert!(!target_headers.contains("www-authenticate:"));
+        assert!(target_headers.contains(&format!("referer: {}/start", redirect.url)));
+        assert!(response.sent.headers.iter().all(|header| !matches!(
+            header.name.to_ascii_lowercase().as_str(),
+            "authorization" | "cookie" | "proxy-authorization" | "www-authenticate"
+        )));
+    }
+
+    #[tokio::test]
+    async fn redirect_limit_allows_ten_hops_and_rejects_the_eleventh() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let local = server(
+            (0..11)
+                .map(|_| (Duration::ZERO, redirect.to_owned()))
+                .collect(),
+        )
+        .await;
+
+        let error = send(
+            &request(format!("{}/loop", local.url)),
+            &SslSettings::default(),
+            &[],
+            None,
+        )
+        .await
+        .expect_err("eleventh redirect must fail");
+        assert!(matches!(
+            error,
+            SendError::InvalidRequest(message) if message == "too many redirects"
+        ));
+        assert_eq!(local.requests.await.expect("server task").len(), 11);
     }
 
     #[tokio::test]

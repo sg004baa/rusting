@@ -99,6 +99,43 @@ fn header_style(name: &str) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn complete_authorization_value(prefix: &str, expected: &str) {
+        let variables = Variables::new();
+        let mut tab = HeadersTab::new();
+        tab.focus_first_control();
+        for character in "Autho".chars() {
+            tab.handle_key(key(KeyCode::Char(character)), &variables);
+        }
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &variables),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &variables),
+            KeyValueAction::Consumed
+        );
+        for character in prefix.chars() {
+            tab.handle_key(key(KeyCode::Char(character)), &variables);
+        }
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Tab), &variables),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(
+            tab.handle_key(key(KeyCode::Enter), &variables),
+            KeyValueAction::Changed
+        );
+        assert_eq!(
+            tab.to_model(),
+            vec![KeyValue::new("Authorization", expected)]
+        );
+    }
 
     #[test]
     fn model_round_trip_preserves_enabled_rows() {
@@ -113,5 +150,16 @@ mod tests {
         tab.load(&request);
         assert_eq!(tab.to_model(), request.headers);
         assert!(tab.has_content());
+    }
+
+    #[test]
+    fn typing_and_tab_complete_authorization_and_bearer() {
+        complete_authorization_value("Bea", "Bearer ");
+    }
+
+    #[test]
+    fn typing_and_tab_complete_basic_and_digest_authorization_values() {
+        complete_authorization_value("Bas", "Basic ");
+        complete_authorization_value("Dig", "Digest ");
     }
 }

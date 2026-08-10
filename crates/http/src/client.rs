@@ -10,18 +10,14 @@ use crate::SendError;
 
 /// Builds a client for one request.
 ///
-/// Redirect, verification, proxy, and timeout settings are request-scoped, so
-/// callers must not cache the returned client across sends.
+/// Verification, proxy, and timeout settings are request-scoped, so callers
+/// must not cache the returned client across sends. Redirects are handled by
+/// the send loop so the last wire request can be recorded exactly.
 pub(crate) fn build(request: &RequestModel, settings: &SslSettings) -> Result<Client, SendError> {
     let timeout = validated_timeout(request.options.timeout)?;
-    let mut builder =
-        Client::builder()
-            .timeout(timeout)
-            .redirect(if request.options.follow_redirects {
-                redirect::Policy::limited(10)
-            } else {
-                redirect::Policy::none()
-            });
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .redirect(redirect::Policy::none());
 
     if !request.options.verify_ssl {
         builder = builder.danger_accept_invalid_certs(true);
