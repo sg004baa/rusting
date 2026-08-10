@@ -20,7 +20,7 @@ use rusting_core::{
 };
 
 use crate::example::Examples;
-use crate::schema::{PARAMETERS, REQUEST_BODIES, SCHEMAS, Spec};
+use crate::schema::{PARAMETERS, PATH_ITEMS, REQUEST_BODIES, SCHEMAS, Spec};
 
 /// The variable every imported URL is written against.
 const BASE_URL: &str = "BASE_URL";
@@ -77,6 +77,9 @@ pub fn import(spec_path: &Path, output_dir: &Path) -> Result<Imported> {
     let mut tag_directories: HashSet<String> = HashSet::new();
 
     for (path, path_item) in spec.get("paths").into_iter().flat_map(schema::entries) {
+        let Some(path_item) = spec.resolve(path_item, PATH_ITEMS) else {
+            continue;
+        };
         let shared = parameter_list(&spec, path_item);
         for (key, operation) in schema::entries(path_item) {
             // Everything in a path item that is not a method — `parameters`,
@@ -85,7 +88,7 @@ pub fn import(spec_path: &Path, output_dir: &Path) -> Result<Imported> {
                 continue;
             };
             let parameters = merge_parameters(&shared, parameter_list(&spec, operation));
-            let mut request = build_request(&spec, method, path, operation, &parameters);
+            let mut request = build_request(&spec, method, path, path_item, operation, &parameters);
 
             let index = match first_tag(operation) {
                 Some(tag) => match tag_nodes.get(tag) {
@@ -164,6 +167,7 @@ fn build_request(
     spec: &Spec,
     method: HttpMethod,
     path: &str,
+    path_item: &Value,
     operation: &Value,
     parameters: &[&Value],
 ) -> RequestModel {
@@ -177,7 +181,7 @@ fn build_request(
             .unwrap_or("")
             .to_owned(),
         method,
-        url: format!("${{{BASE_URL}}}{}", path_template(path)),
+        url: request_url(path, path_item, operation),
         auth: auth_for(spec, operation),
         ..RequestModel::default()
     };
@@ -227,17 +231,43 @@ fn build_request(
 fn request_body(spec: &Spec, operation: &Value) -> Option<BodyContent> {
     let body = operation.get("requestBody")?;
     let content = spec.resolve(body, REQUEST_BODIES)?.get("content")?;
-    if let Some(media_type) = content.get("application/json") {
+
+    let json = schema::entries(content)
+        .find(|(content_type, _)| content_type.eq_ignore_ascii_case("application/json"))
+        .or_else(|| {
+            schema::entries(content)
+                .find(|(content_type, _)| has_json_structured_suffix(content_type))
+        });
+    if let Some((content_type, media_type)) = json {
         return Some(BodyContent::Raw {
             content: Examples::new(spec).media_type(media_type),
-            content_type: Some("application/json".to_owned()),
+            content_type: Some(content_type.to_owned()),
         });
     }
-    let media_type = content.get(BodyContent::FORM_CONTENT_TYPE)?;
-    Some(BodyContent::Form {
-        form_data: form_fields(spec, media_type),
-        content_type: Some(BodyContent::FORM_CONTENT_TYPE.to_owned()),
-    })
+
+    for content_type in [
+        BodyContent::FORM_CONTENT_TYPE,
+        BodyContent::MULTIPART_CONTENT_TYPE,
+    ] {
+        if let Some(media_type) = content.get(content_type) {
+            return Some(BodyContent::Form {
+                form_data: form_fields(spec, media_type),
+                content_type: Some(content_type.to_owned()),
+            });
+        }
+    }
+    None
+}
+
+fn has_json_structured_suffix(media_type: &str) -> bool {
+    let essence = media_type.split(';').next().unwrap_or(media_type).trim();
+    let Some((_, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    subtype
+        .as_bytes()
+        .get(subtype.len().saturating_sub(5)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b"+json"))
 }
 
 fn form_fields(spec: &Spec, media_type: &Value) -> Vec<KeyValue> {
@@ -348,21 +378,23 @@ fn file_name_for(name: &str, method: HttpMethod, path: &str) -> String {
     format!("{stem}{REQUEST_SUFFIX}")
 }
 
-/// The first server's URL, with its `{variable}` placeholders replaced by the
-/// declared defaults. A document without servers yields an empty value: the
-/// requests still go through `${BASE_URL}`, and the user fills it in.
+fn request_url(path: &str, path_item: &Value, operation: &Value) -> String {
+    let base = first_server_url(operation.get("servers"))
+        .or_else(|| first_server_url(path_item.get("servers")))
+        .unwrap_or_else(|| format!("${{{BASE_URL}}}"));
+    format!("{base}{}", path_template(path))
+}
+
+/// The first root server's URL, with its `{variable}` placeholders replaced by
+/// the declared defaults. A document without servers yields an empty value:
+/// root requests still go through `${BASE_URL}`, and the user fills it in.
 fn server_url(spec: &Spec) -> String {
-    let Some(server) = spec
-        .get("servers")
-        .map(schema::items)
-        .and_then(<[Value]>::first)
-    else {
-        return String::new();
-    };
-    let Some(url) = schema::as_str(server, "url") else {
-        return String::new();
-    };
-    let mut url = url.to_owned();
+    first_server_url(spec.get("servers")).unwrap_or_default()
+}
+
+fn first_server_url(servers: Option<&Value>) -> Option<String> {
+    let server = servers.map(schema::items).and_then(<[Value]>::first)?;
+    let mut url = schema::as_str(server, "url")?.to_owned();
     for (name, variable) in server
         .get("variables")
         .into_iter()
@@ -373,7 +405,7 @@ fn server_url(spec: &Spec) -> String {
         };
         url = url.replace(&format!("{{{name}}}"), &default);
     }
-    url
+    Some(url)
 }
 
 /// The text of a scalar, for the few places a document may spell a value as a
@@ -733,6 +765,37 @@ components:
     }
 
     #[test]
+    fn resolves_local_path_item_references_before_importing_operations() {
+        let result = imported(
+            r#"
+openapi: 3.1.0
+info: { title: Path item refs, version: "1.0" }
+paths:
+  /pets: { $ref: '#/components/pathItems/Pets' }
+  /wrong: { $ref: '#/components/schemas/Pets' }
+  /cycle: { $ref: '#/components/pathItems/CycleA' }
+components:
+  pathItems:
+    Pets:
+      parameters:
+        - { name: trace, in: header }
+      get: { summary: List pets }
+    CycleA: { $ref: '#/components/pathItems/CycleB' }
+    CycleB: { $ref: '#/components/pathItems/CycleA' }
+  schemas:
+    Pets:
+      get: { summary: Not a path item component }
+"#,
+        );
+
+        assert_eq!(result.collection.requests.len(), 1);
+        let request = &result.collection.requests[0];
+        assert_eq!(request.name, "List pets");
+        assert_eq!(request.url, "${BASE_URL}/pets");
+        assert_eq!(request.headers, [KeyValue::new("trace", "")]);
+    }
+
+    #[test]
     fn resolves_a_request_body_reference_into_a_schema_reference() {
         let result = imported(
             r#"
@@ -767,6 +830,60 @@ components:
             serde_json::from_str::<serde_json::Value>(content).expect("the body is valid JSON"),
             serde_json::json!({ "name": "", "age": 0 })
         );
+    }
+
+    #[test]
+    fn imports_problem_and_vendor_json_media_types_as_raw_bodies() {
+        let result = imported(
+            r#"
+openapi: 3.1.0
+info: { title: JSON suffixes, version: "1.0" }
+paths:
+  /problem:
+    post:
+      summary: Problem
+      requestBody:
+        content:
+          application/problem+json:
+            schema: { type: object, properties: { detail: { type: string } } }
+  /vendor:
+    post:
+      summary: Vendor
+      requestBody:
+        content:
+          application/vnd.example+JSON:
+            schema: { type: object, properties: { id: { type: integer } } }
+  /unsupported:
+    post:
+      summary: Unsupported
+      requestBody:
+        content:
+          text/plain:
+            schema: { type: string }
+"#,
+        );
+
+        let by_name: BTreeMap<&str, &RequestModel> = result
+            .collection
+            .requests
+            .iter()
+            .map(|request| (request.name.as_str(), request))
+            .collect();
+        assert_eq!(
+            by_name["Problem"].body,
+            Some(BodyContent::Raw {
+                content: "{\n  \"detail\": \"\"\n}".to_owned(),
+                content_type: Some("application/problem+json".to_owned()),
+            })
+        );
+        assert_eq!(
+            by_name["Vendor"].body,
+            Some(BodyContent::Raw {
+                content: "{\n  \"id\": 0\n}".to_owned(),
+                content_type: Some("application/vnd.example+JSON".to_owned()),
+            })
+        );
+        assert_eq!(by_name["Unsupported"].body, None);
     }
 
     #[test]
@@ -846,6 +963,50 @@ paths:
             Some("https://eu.api.example.com/v2")
         );
         assert_eq!(result.collection.requests[0].url, "${BASE_URL}/health");
+    }
+
+    #[test]
+    fn operation_and_path_servers_override_the_root_with_declared_defaults() {
+        let result = imported(
+            r#"
+openapi: 3.1.0
+info: { title: Server precedence, version: "1.0" }
+servers:
+  - url: https://root.example.com
+paths:
+  /root:
+    get: { summary: Root }
+  /path:
+    servers:
+      - url: https://{region}.path.example.com/{version}
+        variables:
+          region: { default: eu }
+          version: { default: v2 }
+    get: { summary: Path }
+  /operation:
+    servers:
+      - url: https://path.example.com
+    get:
+      summary: Operation
+      servers:
+        - url: https://{tenant}.operation.example.com
+          variables:
+            tenant: { default: acme }
+"#,
+        );
+
+        let by_name: BTreeMap<&str, &RequestModel> = result
+            .collection
+            .requests
+            .iter()
+            .map(|request| (request.name.as_str(), request))
+            .collect();
+        assert_eq!(by_name["Root"].url, "${BASE_URL}/root");
+        assert_eq!(by_name["Path"].url, "https://eu.path.example.com/v2/path");
+        assert_eq!(
+            by_name["Operation"].url,
+            "https://acme.operation.example.com/operation"
+        );
     }
 
     #[test]
@@ -1052,6 +1213,35 @@ paths:
             Some(BodyContent::Form {
                 form_data: vec![KeyValue::new("username", ""), KeyValue::new("password", "")],
                 content_type: Some(BodyContent::FORM_CONTENT_TYPE.to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn multipart_bodies_are_imported_as_forms() {
+        let result = imported(
+            r#"
+openapi: 3.1.0
+info: { title: Multipart forms, version: "1.0" }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                caption: { type: string }
+                file: { type: string, format: binary }
+"#,
+        );
+
+        assert_eq!(
+            result.collection.requests[0].body,
+            Some(BodyContent::Form {
+                form_data: vec![KeyValue::new("caption", ""), KeyValue::new("file", "")],
+                content_type: Some(BodyContent::MULTIPART_CONTENT_TYPE.to_owned()),
             })
         );
     }

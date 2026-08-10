@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget as _};
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme;
 
@@ -143,12 +144,24 @@ impl Popup {
         if height == 0 || anchor.width == 0 {
             return;
         }
+        let candidate_width = self
+            .items
+            .iter()
+            .map(|item| item.text.width())
+            .max()
+            .unwrap_or(0);
+        let width = u16::try_from(candidate_width)
+            .unwrap_or(u16::MAX)
+            .max(anchor.width)
+            .min(screen.width);
+        let max_x = screen.right().saturating_sub(width);
+        let x = anchor.x.clamp(screen.x, max_x);
         let y = if use_below {
             anchor.bottom()
         } else {
             anchor.y.saturating_sub(height)
         };
-        let area = Rect::new(anchor.x, y, anchor.width, height);
+        let area = Rect::new(x, y, width, height);
         Clear.render(area, buffer);
 
         let selected = self.selected.unwrap_or(0);
@@ -257,6 +270,18 @@ mod tests {
         assert_eq!(buffer[(0, 2)].symbol(), "o");
         assert_eq!(buffer[(0, 3)].symbol(), "t");
         assert_eq!(buffer[(0, 4)].symbol(), " ");
+    }
+
+    #[test]
+    fn popup_expands_a_caret_anchor_to_the_longest_candidate() {
+        let screen = Rect::new(0, 0, 20, 3);
+        let anchor = Rect::new(18, 0, 1, 1);
+        let mut buffer = Buffer::empty(screen);
+        let mut popup = Popup::new();
+        popup.open(vec![item("Authorization")]);
+        popup.render(anchor, screen, &mut buffer);
+        let rendered = (7..20).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        assert_eq!(rendered, "Authorization");
     }
 
     #[test]

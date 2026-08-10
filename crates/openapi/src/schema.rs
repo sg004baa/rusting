@@ -13,6 +13,7 @@ use serde_norway::Value;
 pub(crate) const SCHEMAS: &str = "schemas";
 pub(crate) const PARAMETERS: &str = "parameters";
 pub(crate) const REQUEST_BODIES: &str = "requestBodies";
+pub(crate) const PATH_ITEMS: &str = "pathItems";
 
 pub(crate) struct Spec {
     root: Value,
