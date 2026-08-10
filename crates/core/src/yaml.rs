@@ -216,10 +216,12 @@ fn format_block_literal(text: &str, indent: usize) -> Option<String> {
 
     let trailing_newlines = text.len() - text.trim_end_matches('\n').len();
     let body = text.trim_end_matches('\n');
-    // Trailing whitespace on a line is silently eaten by any YAML reader, so
-    // strip it here and keep the file honest about what will load back.
-    let lines: Vec<&str> = body.split('\n').map(|line| line.trim_end()).collect();
-    if lines.iter().any(|line| line.starts_with('\t')) {
+    // Quoted serialization is required to preserve trailing horizontal
+    // whitespace exactly.
+    if body
+        .split('\n')
+        .any(|line| line.ends_with([' ', '\t']) || line.starts_with('\t'))
+    {
         return None;
     }
 
@@ -231,7 +233,7 @@ fn format_block_literal(text: &str, indent: usize) -> Option<String> {
 
     let body_indent = indent + 2;
     let mut out = format!("|{chomping}");
-    for line in lines {
+    for line in body.split('\n') {
         out.push('\n');
         if !line.is_empty() {
             for _ in 0..body_indent {
@@ -374,6 +376,24 @@ mod tests {
              \"a\": 1\n    \
              }\n  \
              content_type: application/json\n"
+        );
+        assert_eq!(round_trip(&model), model);
+    }
+
+    #[test]
+    fn multiline_body_with_trailing_horizontal_whitespace_is_quoted_losslessly() {
+        let model = RequestModel {
+            body: Some(BodyContent::Raw {
+                content: "first line \nsecond line\t\nthird line".into(),
+                content_type: None,
+            }),
+            ..Default::default()
+        };
+
+        let text = super::to_string(&model).unwrap();
+        assert_eq!(
+            text,
+            "body:\n  content: \"first line \\nsecond line\\t\\nthird line\"\n"
         );
         assert_eq!(round_trip(&model), model);
     }

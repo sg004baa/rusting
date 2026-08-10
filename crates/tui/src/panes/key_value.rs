@@ -155,7 +155,12 @@ impl KeyValueEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> KeyValueAction {
-        if self.popup.is_open() && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        let backward = key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::SHIFT));
+        if self.popup.is_open() && !backward {
             match self.popup.handle_key(key) {
                 PopupAction::Accepted(index) => {
                     self.accept_completion(index);
@@ -675,6 +680,25 @@ mod tests {
             KeyValueAction::Consumed
         );
         assert_eq!(editor.focus, Focus::Value);
+    }
+
+    #[test]
+    fn backtab_traverses_backward_without_accepting_an_open_completion() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.key_candidates = vec!["Authorization".to_owned()];
+        editor.focus_first_control();
+        for character in "Auth".chars() {
+            editor.handle_key(key(KeyCode::Char(character)), &vars);
+        }
+        assert!(editor.popup.is_open());
+
+        assert_eq!(
+            editor.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &vars,),
+            KeyValueAction::LeaveUp
+        );
+        assert_eq!(editor.key.value(), "Auth");
+        assert!(!editor.popup.is_open());
     }
 
     #[test]

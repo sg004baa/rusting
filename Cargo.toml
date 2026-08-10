@@ -57,7 +57,9 @@ reqwest = { version = "0.13", default-features = false, features = [
     "socks",
     "system-proxy",
 ] }
-diqwest = "3"
+bytes = "1"
+digest_auth = "0.3.1"
+futures-util = "0.3"
 http = "1"
 url = "2"
 ratatui = "0.30"

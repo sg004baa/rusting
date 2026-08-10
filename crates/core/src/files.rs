@@ -73,12 +73,17 @@ pub enum DirectoryError {
 
 pub fn validate_directory(path: &str) -> Result<(), DirectoryError> {
     let trimmed = path.trim();
-    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+    if trimmed.starts_with(['/', '\\'])
+        || matches!(
+            trimmed.as_bytes(),
+            [drive, b':', ..] if drive.is_ascii_alphabetic()
+        )
+    {
         return Err(DirectoryError::Absolute);
     }
-    if Path::new(trimmed)
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
+    if trimmed
+        .split(['/', '\\'])
+        .any(|component| component == "..")
     {
         return Err(DirectoryError::Escapes);
     }
@@ -187,12 +192,24 @@ mod tests {
     }
 
     #[test]
-    fn directory_validation() {
-        assert_eq!(validate_directory("/abs"), Err(DirectoryError::Absolute));
-        assert_eq!(validate_directory("a/../b"), Err(DirectoryError::Escapes));
-        assert!(validate_directory("").is_ok());
-        assert!(validate_directory(".").is_ok());
-        assert!(validate_directory("a/b").is_ok());
+    fn directory_validation_is_platform_neutral() {
+        for path in ["/abs", r"\abs", r"\\server\share", r"C:\abs", "z:relative"] {
+            assert_eq!(
+                validate_directory(path),
+                Err(DirectoryError::Absolute),
+                "{path}"
+            );
+        }
+        for path in ["a/../b", r"a\..\b", r"a/..\b"] {
+            assert_eq!(
+                validate_directory(path),
+                Err(DirectoryError::Escapes),
+                "{path}"
+            );
+        }
+        for path in ["", ".", "a/b", "a/./b", r"a\b", "a/.../b", "a..b"] {
+            assert!(validate_directory(path).is_ok(), "{path}");
+        }
     }
 
     #[test]
