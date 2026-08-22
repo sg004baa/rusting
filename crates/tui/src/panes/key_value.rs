@@ -117,10 +117,14 @@ impl KeyValueEditor {
         }
     }
 
-    /// Start traversal at the first editable control rather than the table.
-    /// Existing rows remain available through arrow-key navigation.
+    /// Start idle traversal at the first existing row, or at the key input
+    /// when empty. An in-progress add or edit keeps its draft.
     pub fn focus_first_control(&mut self) {
-        if self.allow_add {
+        if self.allow_add && matches!(self.mode, Mode::Idle) && self.table.selected().is_some() {
+            self.table.set_cursor(0);
+            self.focus = Focus::Table;
+            self.close_popup();
+        } else if self.allow_add {
             if matches!(self.mode, Mode::Idle) {
                 self.mode = Mode::Adding;
             }
@@ -652,6 +656,67 @@ mod tests {
             KeyValueAction::Changed
         );
         assert_eq!(editor.rows()[0], KeyValue::new("changed", "again"));
+    }
+
+    #[test]
+    fn focus_first_control_prefers_an_existing_row_over_adding() {
+        let vars = Variables::new();
+        let mut populated = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        populated.set_rows(vec![
+            KeyValue::new("first", "one"),
+            KeyValue::new("second", "two"),
+        ]);
+        populated.table.set_cursor(1);
+
+        populated.focus_first_control();
+        assert_eq!(populated.focus, Focus::Table);
+        assert_eq!(populated.table.cursor(), 0);
+        assert_eq!(
+            populated.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(populated.focus, Focus::Key);
+        assert_eq!(populated.editing().unwrap().name, "first");
+        populated.key.set_value("changed");
+        populated.focus = Focus::Value;
+        populated.focus_first_control();
+        assert_eq!(populated.focus, Focus::Key);
+        assert_eq!(populated.key.value(), "changed");
+        assert_eq!(
+            populated.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+        assert_eq!(populated.rows()[0], KeyValue::new("changed", "one"));
+        assert_eq!(populated.rows()[1], KeyValue::new("second", "two"));
+
+        let mut empty = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        empty.focus_first_control();
+        assert_eq!(empty.focus, Focus::Key);
+        assert!(matches!(empty.mode, Mode::Adding));
+    }
+
+    #[test]
+    fn focus_first_control_preserves_an_active_add_draft() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.focus_first_control();
+        editor.key.set_value("saved");
+        editor.value.set_value("row");
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+
+        editor.key.set_value("draft");
+        editor.value.set_value("pending");
+        editor.focus = Focus::Button;
+        editor.focus_first_control();
+
+        assert_eq!(editor.focus, Focus::Key);
+        assert!(matches!(editor.mode, Mode::Adding));
+        assert_eq!(editor.key.value(), "draft");
+        assert_eq!(editor.value.value(), "pending");
+        assert_eq!(editor.rows(), &[KeyValue::new("saved", "row")]);
     }
 
     #[test]
