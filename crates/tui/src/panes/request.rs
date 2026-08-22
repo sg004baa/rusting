@@ -8,7 +8,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget as _};
-use rusting_core::{KeyValue, RequestModel, Variables};
+use rusting_core::{KeyValue, RequestModel, ScriptHook, ScriptRef, Variables};
 
 use crate::panes::auth::{AuthAction, AuthTab};
 use crate::panes::body::{BodyAction, BodyTab};
@@ -192,6 +192,14 @@ impl RequestPane {
         request.scripts = self.scripts.to_model();
         request.options = self.options.to_model()?;
         Ok(request)
+    }
+
+    pub fn configured_script_hooks(&self) -> Vec<(ScriptHook, String, ScriptRef)> {
+        self.scripts.configured_hooks()
+    }
+
+    pub fn refresh_script_candidates(&mut self) {
+        self.scripts.refresh_candidates();
     }
 
     pub fn sync_path_params_from_url(&mut self, url: &str) {
