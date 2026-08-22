@@ -82,6 +82,18 @@ impl ScriptsTab {
         }
     }
 
+    pub fn configured_hooks(&self) -> Vec<(ScriptHook, String, ScriptRef)> {
+        ScriptHook::ALL
+            .into_iter()
+            .zip(&self.inputs)
+            .filter_map(|(hook, input)| {
+                let configured = input.value().trim();
+                ScriptRef::parse(configured, hook)
+                    .map(|reference| (hook, configured.to_owned(), reference))
+            })
+            .collect()
+    }
+
     pub fn focus_first_control(&mut self) {
         self.focus = 0;
         self.close_popup();
@@ -93,12 +105,6 @@ impl ScriptsTab {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ScriptsAction {
-        if key.code == KeyCode::Tab {
-            return self.move_down();
-        }
-        if key.code == KeyCode::BackTab {
-            return self.move_up();
-        }
         if self.popup.is_open() {
             match self.popup.handle_key(key) {
                 PopupAction::Accepted(index) => {
@@ -112,6 +118,12 @@ impl ScriptsTab {
                 PopupAction::Consumed => return ScriptsAction::Consumed,
                 PopupAction::Ignored => {}
             }
+        }
+        if key.code == KeyCode::Tab {
+            return self.move_down();
+        }
+        if key.code == KeyCode::BackTab {
+            return self.move_up();
         }
 
         if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL {
@@ -325,8 +337,92 @@ mod tests {
     }
 
     #[test]
+    fn tab_accepts_open_completion_before_advancing_focus() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(directory.path().join("scripts")).expect("scripts dir");
+        fs::write(directory.path().join("scripts/hooks.js"), "export {};").expect("script");
+        let mut tab = ScriptsTab::new(directory.path().to_owned());
+
+        for character in "hooks".chars() {
+            assert_eq!(
+                tab.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                ScriptsAction::Changed
+            );
+        }
+        assert!(tab.popup.is_open());
+        assert_eq!(tab.focus, 0);
+
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            ScriptsAction::Changed
+        );
+        assert_eq!(tab.inputs[0].value(), "scripts/hooks.js");
+        assert!(!tab.popup.is_open());
+        assert_eq!(tab.focus, 0);
+
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            ScriptsAction::Consumed
+        );
+        assert_eq!(tab.focus, 1);
+    }
+
+    #[test]
+    fn enter_accepts_completion_with_explicit_function_suffix() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(directory.path().join("scripts")).expect("scripts dir");
+        fs::write(directory.path().join("scripts/hooks.js"), "export {};").expect("script");
+        let mut tab = ScriptsTab::new(directory.path().to_owned());
+
+        for character in "hooks:custom".chars() {
+            assert_eq!(
+                tab.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                ScriptsAction::Changed
+            );
+        }
+        assert!(tab.popup.is_open());
+
+        assert_eq!(
+            tab.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ScriptsAction::Changed
+        );
+        assert_eq!(tab.inputs[0].value(), "scripts/hooks.js:custom");
+        assert!(!tab.popup.is_open());
+        assert_eq!(tab.focus, 0);
+    }
+
+    #[test]
     fn empty_inputs_are_absent_from_model() {
         let tab = ScriptsTab::new(PathBuf::from("."));
         assert!(tab.to_model().is_empty());
+    }
+
+    #[test]
+    fn configured_hooks_preserve_references_and_skip_empty_inputs() {
+        let mut tab = ScriptsTab::new(PathBuf::from("."));
+        tab.inputs[0].set_value("scripts/setup.js:prepare");
+        tab.inputs[2].set_value("scripts/response.js");
+
+        assert_eq!(
+            tab.configured_hooks(),
+            vec![
+                (
+                    ScriptHook::Setup,
+                    "scripts/setup.js:prepare".to_owned(),
+                    ScriptRef {
+                        path: PathBuf::from("scripts/setup.js"),
+                        function: "prepare".to_owned(),
+                    },
+                ),
+                (
+                    ScriptHook::OnResponse,
+                    "scripts/response.js".to_owned(),
+                    ScriptRef {
+                        path: PathBuf::from("scripts/response.js"),
+                        function: "on_response".to_owned(),
+                    },
+                ),
+            ]
+        );
     }
 }
