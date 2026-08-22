@@ -9,7 +9,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget as _};
 use rusting_core::KeyValue;
@@ -283,7 +283,7 @@ impl KeyValueTable {
         let mut table = Table::new(rows, widths).row_highlight_style(if focused {
             theme::selection()
         } else {
-            Style::new().add_modifier(Modifier::REVERSED)
+            Style::new()
         });
         if self.show_header {
             let mut header = Vec::with_capacity(3);
@@ -322,6 +322,7 @@ impl KeyValueTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -478,6 +479,28 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn selection_style_is_only_visible_while_focused() {
+        let mut table = table_with(1);
+        let area = Rect::new(0, 0, 24, 1);
+
+        let mut unfocused = Buffer::empty(area);
+        table.render(area, &mut unfocused, false);
+        let unfocused_style = unfocused[(4, 0)].style();
+        assert!(!unfocused_style.add_modifier.contains(Modifier::REVERSED));
+        assert_ne!(unfocused_style.bg, theme::selection().bg);
+
+        let mut focused = Buffer::empty(area);
+        table.render(area, &mut focused, true);
+        let focused_style = focused[(4, 0)].style();
+        assert_eq!(focused_style.bg, theme::selection().bg);
+        assert!(
+            focused_style
+                .add_modifier
+                .contains(theme::selection().add_modifier)
+        );
     }
 
     #[test]
