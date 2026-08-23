@@ -312,6 +312,10 @@ impl CollectionPane {
     }
 }
 
+fn has_request_in_subtree(collection: &Collection) -> bool {
+    !collection.requests.is_empty() || collection.children.iter().any(has_request_in_subtree)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flatten_collection(
     collection: &Collection,
@@ -355,6 +359,9 @@ fn flatten_collection(
     }
 
     for child in &collection.children {
+        if !has_request_in_subtree(child) {
+            continue;
+        }
         let key = NodeKey::Directory(child.path.clone());
         let id = id_for(key, ids, next_id);
         let is_expanded = expanded.contains(&child.path);
@@ -410,7 +417,11 @@ fn directory_paths(collection: &Collection) -> HashSet<PathBuf> {
 }
 
 fn collect_directory_paths(collection: &Collection, paths: &mut HashSet<PathBuf>) {
-    for child in &collection.children {
+    for child in collection
+        .children
+        .iter()
+        .filter(|child| has_request_in_subtree(child))
+    {
         paths.insert(child.path.clone());
         collect_directory_paths(child, paths);
     }
@@ -511,6 +522,20 @@ mod tests {
             .join("\n")
     }
 
+    fn tree_labels(pane: &CollectionPane) -> Vec<String> {
+        pane.tree
+            .nodes()
+            .iter()
+            .map(|node| {
+                node.label
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
     fn flattening_hides_the_root_and_expands_directories_initially() {
         let pane = CollectionPane::new(&collection());
@@ -521,6 +546,73 @@ mod tests {
         assert!(pane.tree.nodes()[1].expandable);
         assert!(pane.tree.nodes()[1].expanded);
         assert_eq!(pane.tree.nodes()[2].depth, 1);
+    }
+
+    #[test]
+    fn flattening_hides_an_asset_only_scripts_sibling() {
+        let mut value = collection();
+        let scripts_path = value.path.join("scripts");
+        value.children.push(Collection {
+            path: scripts_path.clone(),
+            name: "scripts".to_owned(),
+            requests: Vec::new(),
+            children: Vec::new(),
+        });
+
+        let pane = CollectionPane::new(&value);
+
+        assert_eq!(
+            tree_labels(&pane),
+            vec![" GET health", "users/", " POS create"]
+        );
+        assert!(!pane.known_directories.contains(&scripts_path));
+        assert!(!pane.expanded.contains(&scripts_path));
+    }
+
+    #[test]
+    fn flattening_keeps_ancestors_of_a_nested_request_visible() {
+        let root = PathBuf::from("/tmp/apis");
+        let parent_path = root.join("parent");
+        let nested_path = parent_path.join("nested");
+        let value = Collection {
+            path: root,
+            name: "apis".to_owned(),
+            requests: Vec::new(),
+            children: vec![Collection {
+                path: parent_path,
+                name: "parent".to_owned(),
+                requests: Vec::new(),
+                children: vec![Collection {
+                    path: nested_path.clone(),
+                    name: "nested".to_owned(),
+                    requests: vec![request(
+                        &nested_path,
+                        "details.posting.yaml",
+                        HttpMethod::Get,
+                        "https://api.example.com/details",
+                        "",
+                    )],
+                    children: Vec::new(),
+                }],
+            }],
+        };
+
+        let pane = CollectionPane::new(&value);
+
+        assert_eq!(
+            tree_labels(&pane),
+            vec!["parent/", "nested/", " GET details"]
+        );
+        assert_eq!(
+            pane.tree
+                .nodes()
+                .iter()
+                .map(|node| node.depth)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(pane.tree.nodes()[0].expanded);
+        assert!(pane.tree.nodes()[1].expanded);
     }
 
     #[test]
