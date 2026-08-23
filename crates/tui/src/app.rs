@@ -1,6 +1,7 @@
 use std::{
+    fs::{self, OpenOptions},
     io::{self, Write as _},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -28,7 +29,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use rusting_core::{
-    Collection, RequestModel, ScriptHook,
+    Collection, RequestModel, ScriptHook, ScriptRef,
     collection::{self, LoadFailure, load_request},
     config::{RequestOpenFocus, ResponseFocus, Settings},
     env::Environment,
@@ -97,7 +98,7 @@ enum PalettePurpose {
     Search(Vec<PathBuf>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CommandChoice {
     Reset,
     ExpandRequest,
@@ -105,6 +106,11 @@ enum CommandChoice {
     ToggleCollection,
     LoadEnv,
     CopyYaml,
+    EditScript {
+        hook: ScriptHook,
+        configured: String,
+        reference: ScriptRef,
+    },
     Quit,
 }
 
@@ -443,7 +449,8 @@ impl App {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
-        if self.keymap.action_for(key) == Some(Action::Quit) {
+        let action = self.keymap.action_for(key);
+        if action == Some(Action::Quit) {
             self.quit = true;
             return;
         }
@@ -451,7 +458,27 @@ impl App {
             self.handle_modal_key(key);
             return;
         }
-        if let Some(action) = self.keymap.action_for(key)
+
+        let local_first = key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Char(_))
+            && matches!(self.focus, Focus::Url | Focus::RequestBody);
+        if local_first {
+            let consumed = match self.focus {
+                Focus::Url => self.handle_url_key(key, finished_tx, progress_tx).await,
+                Focus::RequestBody => self.handle_request_key(key),
+                _ => unreachable!(),
+            };
+            if consumed {
+                return;
+            }
+            if let Some(action) = action {
+                self.handle_global(action, key, finished_tx, progress_tx)
+                    .await;
+            }
+            return;
+        }
+
+        if let Some(action) = action
             && self
                 .handle_global(action, key, finished_tx, progress_tx)
                 .await
@@ -823,9 +850,34 @@ impl App {
             self.toasts.push("No editor is configured", Severity::Error);
             return;
         };
-        match self.run_external(|| external::edit_path_in_external(&command, path)) {
+        self.run_script_editor(&command, path);
+    }
+
+    fn edit_configured_script(&mut self, hook: ScriptHook, reference: &ScriptRef) {
+        let Some(command) = self.settings.editor.clone() else {
+            self.toasts.push("No editor is configured", Severity::Error);
+            return;
+        };
+        let (path, created) = match prepare_script_for_edit(&self.collection.path, hook, reference)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.toasts
+                    .push(format!("Editor failed: {error:#}"), Severity::Error);
+                return;
+            }
+        };
+        if created {
+            self.request_pane.refresh_script_candidates();
+        }
+        self.run_script_editor(&command, &path);
+    }
+
+    fn run_script_editor(&mut self, command: &str, path: &Path) {
+        match self.run_external(|| external::edit_path_in_external(command, path)) {
             Ok(()) => {
                 self.script_engine.invalidate(path);
+                self.request_pane.refresh_script_candidates();
                 self.toasts
                     .push(format!("Edited {}", path.display()), Severity::Information);
             }
@@ -1375,27 +1427,16 @@ impl App {
             CommandChoice::ToggleCollection,
             CommandChoice::LoadEnv,
             CommandChoice::CopyYaml,
-            CommandChoice::Quit,
         ]);
-        let items = choices
-            .iter()
-            .enumerate()
-            .map(|(id, choice)| PaletteItem {
-                label: match choice {
-                    CommandChoice::Reset => "view: Reset",
-                    CommandChoice::ExpandRequest => "view: Expand request section",
-                    CommandChoice::ExpandResponse => "view: Expand response section",
-                    CommandChoice::ToggleCollection => "view: Toggle collection browser",
-                    CommandChoice::LoadEnv => "environment: Load env file",
-                    CommandChoice::CopyYaml => "export: copy as YAML",
-                    CommandChoice::Quit => "app: Quit rusting",
-                }
-                .to_owned(),
-                hint: None,
-                search_extra: None,
-                id,
-            })
-            .collect();
+        choices.extend(self.request_pane.configured_script_hooks().into_iter().map(
+            |(hook, configured, reference)| CommandChoice::EditScript {
+                hook,
+                configured,
+                reference,
+            },
+        ));
+        choices.push(CommandChoice::Quit);
+        let items = command_palette_items(&choices);
         self.modal = Some(ActiveModal::Palette {
             modal: Palette::new("Type a command", items),
             purpose: PalettePurpose::Commands(choices),
@@ -1428,7 +1469,7 @@ impl App {
     fn accept_palette(&mut self, chosen: usize, purpose: PalettePurpose) {
         match purpose {
             PalettePurpose::Commands(choices) => {
-                if let Some(choice) = choices.get(chosen).copied() {
+                if let Some(choice) = choices.get(chosen).cloned() {
                     match choice {
                         CommandChoice::Reset => self.expanded = None,
                         CommandChoice::ExpandRequest => self.expanded = Some(Section::Request),
@@ -1445,6 +1486,9 @@ impl App {
                             },
                             Err(error) => self.toasts.push(error, Severity::Error),
                         },
+                        CommandChoice::EditScript {
+                            hook, reference, ..
+                        } => self.edit_configured_script(hook, &reference),
                         CommandChoice::Quit => self.quit = true,
                     }
                 }
@@ -1602,6 +1646,166 @@ impl App {
             }
             self.toasts
                 .push("Collection reloaded", Severity::Information);
+        }
+    }
+}
+
+fn command_palette_items(choices: &[CommandChoice]) -> Vec<PaletteItem> {
+    choices
+        .iter()
+        .enumerate()
+        .map(|(id, choice)| {
+            let (label, hint, search_extra) = match choice {
+                CommandChoice::Reset => ("view: Reset".to_owned(), None, None),
+                CommandChoice::ExpandRequest => {
+                    ("view: Expand request section".to_owned(), None, None)
+                }
+                CommandChoice::ExpandResponse => {
+                    ("view: Expand response section".to_owned(), None, None)
+                }
+                CommandChoice::ToggleCollection => {
+                    ("view: Toggle collection browser".to_owned(), None, None)
+                }
+                CommandChoice::LoadEnv => ("environment: Load env file".to_owned(), None, None),
+                CommandChoice::CopyYaml => ("export: copy as YAML".to_owned(), None, None),
+                CommandChoice::EditScript {
+                    hook, configured, ..
+                } => (
+                    format!("scripts: Edit {} hook", hook.label()),
+                    Some(configured.clone()),
+                    Some(configured.clone()),
+                ),
+                CommandChoice::Quit => ("app: Quit rusting".to_owned(), None, None),
+            };
+            PaletteItem {
+                label,
+                hint,
+                search_extra,
+                id,
+            }
+        })
+        .collect()
+}
+
+fn prepare_script_for_edit(
+    collection_root: &Path,
+    hook: ScriptHook,
+    reference: &ScriptRef,
+) -> anyhow::Result<(PathBuf, bool)> {
+    let resolved = if reference.path.is_absolute() {
+        reference.path.clone()
+    } else {
+        collection_root.join(&reference.path)
+    };
+    if resolved.is_file() {
+        return Ok((resolved, false));
+    }
+    match fs::symlink_metadata(&resolved) {
+        Ok(_) => bail!("script path is not a regular file: {}", resolved.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("could not inspect script {}", resolved.display()));
+        }
+    }
+    if reference.path.is_absolute() {
+        bail!(
+            "cannot create script outside the collection: {}",
+            reference.path.display()
+        );
+    }
+
+    let mut parts = Vec::new();
+    for component in reference.path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!(
+                    "cannot create script from unsafe path {}",
+                    reference.path.display()
+                );
+            }
+        }
+    }
+    let file_name = parts
+        .pop()
+        .context("script reference does not contain a file name")?;
+    let canonical_root = collection_root.canonicalize().with_context(|| {
+        format!(
+            "could not resolve collection root {}",
+            collection_root.display()
+        )
+    })?;
+    if !canonical_root.is_dir() {
+        bail!(
+            "collection root is not a directory: {}",
+            collection_root.display()
+        );
+    }
+
+    let mut parent = canonical_root.clone();
+    for directory in parts {
+        parent.push(directory);
+        ensure_script_directory(&parent)?;
+    }
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("could not resolve script directory {}", parent.display()))?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        bail!(
+            "cannot create script outside the collection: {}",
+            resolved.display()
+        );
+    }
+    let creation_path = canonical_parent.join(file_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&creation_path)
+        .with_context(|| format!("could not create script {}", resolved.display()))?;
+    let arguments = match hook {
+        ScriptHook::Setup => "rusting",
+        ScriptHook::OnRequest => "request, rusting",
+        ScriptHook::OnResponse => "response, rusting",
+    };
+    let starter = format!(
+        "export function {}({arguments}) {{\n}}\n",
+        reference.function
+    );
+    if let Err(error) = file.write_all(starter.as_bytes()) {
+        drop(file);
+        let _ = fs::remove_file(&creation_path);
+        return Err(error).with_context(|| format!("could not initialize {}", resolved.display()));
+    }
+    Ok((resolved, true))
+}
+
+fn ensure_script_directory(path: &Path) -> anyhow::Result<()> {
+    loop {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "cannot create script through symlinked directory {}",
+                    path.display()
+                );
+            }
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => bail!("script parent is not a directory: {}", path.display()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(path) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("could not create script directory {}", path.display())
+                    });
+                }
+            },
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not inspect script directory {}", path.display())
+                });
+            }
         }
     }
 }
@@ -1806,6 +2010,155 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_lists_only_configured_hooks_with_their_references() {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        app.request_pane.load(&RequestModel {
+            scripts: rusting_core::Scripts {
+                setup: Some("scripts/hooks.js:prepare".to_owned()),
+                on_request: None,
+                on_response: Some("scripts/hooks.js:inspect".to_owned()),
+            },
+            ..RequestModel::default()
+        });
+
+        app.open_command_palette();
+        let Some(ActiveModal::Palette {
+            purpose: PalettePurpose::Commands(choices),
+            ..
+        }) = app.modal.as_ref()
+        else {
+            panic!("command palette");
+        };
+        let edit_choices = choices
+            .iter()
+            .filter_map(|choice| match choice {
+                CommandChoice::EditScript {
+                    hook,
+                    configured,
+                    reference,
+                } => Some((*hook, configured.as_str(), reference.function.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edit_choices,
+            vec![
+                (ScriptHook::Setup, "scripts/hooks.js:prepare", "prepare"),
+                (
+                    ScriptHook::OnResponse,
+                    "scripts/hooks.js:inspect",
+                    "inspect"
+                ),
+            ]
+        );
+
+        let items = command_palette_items(choices);
+        let script_items = items
+            .iter()
+            .filter(|item| item.label.starts_with("scripts:"))
+            .collect::<Vec<_>>();
+        assert_eq!(script_items.len(), 2);
+        assert_eq!(script_items[0].label, "scripts: Edit Setup hook");
+        assert_eq!(
+            script_items[0].hint.as_deref(),
+            Some("scripts/hooks.js:prepare")
+        );
+        assert_eq!(
+            script_items[0].search_extra.as_deref(),
+            Some("scripts/hooks.js:prepare")
+        );
+        assert_eq!(script_items[1].label, "scripts: Edit Post-response hook");
+    }
+
+    #[test]
+    fn script_starters_export_the_configured_function_with_hook_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        for (hook, configured, expected) in [
+            (
+                ScriptHook::Setup,
+                "scripts/setup.js:prepare",
+                "export function prepare(rusting) {\n}\n",
+            ),
+            (
+                ScriptHook::OnRequest,
+                "scripts/request.js:beforeSend",
+                "export function beforeSend(request, rusting) {\n}\n",
+            ),
+            (
+                ScriptHook::OnResponse,
+                "scripts/response.js:inspect",
+                "export function inspect(response, rusting) {\n}\n",
+            ),
+        ] {
+            let reference = ScriptRef::parse(configured, hook).unwrap();
+            let (path, created) = prepare_script_for_edit(root.path(), hook, &reference).unwrap();
+            assert!(created);
+            assert_eq!(path, root.path().join(&reference.path));
+            assert_eq!(fs::read_to_string(path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn missing_nested_script_is_created_without_overwriting_an_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let reference =
+            ScriptRef::parse("scripts/nested/hook.js:prepare", ScriptHook::Setup).unwrap();
+        let (path, created) =
+            prepare_script_for_edit(root.path(), ScriptHook::Setup, &reference).unwrap();
+        assert!(created);
+        fs::write(&path, "existing contents").unwrap();
+
+        let (same_path, created) =
+            prepare_script_for_edit(root.path(), ScriptHook::Setup, &reference).unwrap();
+        assert_eq!(same_path, path);
+        assert!(!created);
+        assert_eq!(fs::read_to_string(path).unwrap(), "existing contents");
+    }
+
+    #[test]
+    fn missing_scripts_outside_or_traversing_the_collection_are_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("collection");
+        fs::create_dir(&root).unwrap();
+        let traversal = ScriptRef::parse("../escape.js", ScriptHook::Setup).unwrap();
+        assert!(prepare_script_for_edit(&root, ScriptHook::Setup, &traversal).is_err());
+        assert!(!workspace.path().join("escape.js").exists());
+
+        let absolute_path = workspace.path().join("absolute.js");
+        let absolute = ScriptRef {
+            path: absolute_path.clone(),
+            function: "setup".to_owned(),
+        };
+        assert!(prepare_script_for_edit(&root, ScriptHook::Setup, &absolute).is_err());
+        assert!(!absolute_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_script_creation_rejects_a_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("collection");
+        let outside = workspace.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        let reference = ScriptRef::parse("linked/hook.js", ScriptHook::Setup).unwrap();
+
+        assert!(prepare_script_for_edit(&root, ScriptHook::Setup, &reference).is_err());
+        assert!(!outside.join("hook.js").exists());
+    }
+
+    #[test]
     fn focus_section_expansion_is_reversible() {
         let settings = Settings {
             watch_env_files: false,
@@ -1952,6 +2305,118 @@ mod tests {
         assert!(result.is_err());
         assert!(app.post_external_repaint);
         assert!(!app.event_pause.load(Ordering::Acquire));
+    }
+
+    fn app_for_key_dispatch() -> (App, tempfile::TempDir) {
+        let settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let collection = Collection::new(root.path());
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        (app, root)
+    }
+
+    fn key_dispatch_senders() -> (
+        mpsc::UnboundedSender<SendFinished>,
+        mpsc::UnboundedSender<(u64, PhaseEvent)>,
+    ) {
+        let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        (finished_tx, progress_tx)
+    }
+
+    #[tokio::test]
+    async fn slash_is_inserted_into_a_focused_script_input() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
+        app.request_pane.load(&RequestModel {
+            scripts: rusting_core::Scripts {
+                setup: Some("scripts".to_owned()),
+                on_request: None,
+                on_response: None,
+            },
+            ..RequestModel::default()
+        });
+        app.request_pane.set_active_tab(RequestTab::Scripts);
+        app.set_focus(Focus::RequestBody);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &finished_tx,
+            &progress_tx,
+        )
+        .await;
+
+        let model = app.request_pane.to_model(&app.current).unwrap();
+        assert_eq!(model.scripts.setup.as_deref(), Some("scripts/"));
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn slash_is_inserted_into_the_focused_url() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
+        app.url_bar.set_url("https://example.test");
+        app.set_focus(Focus::Url);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &finished_tx,
+            &progress_tx,
+        )
+        .await;
+
+        assert_eq!(app.url_bar.url(), "https://example.test/");
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn slash_opens_request_search_from_the_request_tab_bar() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
+        app.set_focus(Focus::RequestTabs);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &finished_tx,
+            &progress_tx,
+        )
+        .await;
+
+        assert!(matches!(
+            app.modal.as_ref(),
+            Some(ActiveModal::Palette {
+                purpose: PalettePurpose::Search(_),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn slash_opens_request_search_when_the_request_control_ignores_it() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
+        app.request_pane.set_active_tab(RequestTab::Options);
+        app.set_focus(Focus::RequestBody);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &finished_tx,
+            &progress_tx,
+        )
+        .await;
+
+        assert!(matches!(
+            app.modal.as_ref(),
+            Some(ActiveModal::Palette {
+                purpose: PalettePurpose::Search(_),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
