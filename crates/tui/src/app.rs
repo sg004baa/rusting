@@ -948,8 +948,16 @@ impl App {
     /// edits are applied.
     fn reopen_if_changed(&mut self, path: &Path) {
         match load_request(path) {
-            Ok(request) if request != self.current => self.load_model(request),
-            Ok(_) => {}
+            Ok(mut request) => {
+                // Runtime cookies are serde-skipped and must not affect persisted equality.
+                let cookies = std::mem::take(&mut self.current.cookies);
+                if request != self.current {
+                    request.cookies = cookies;
+                    self.load_model(request);
+                } else {
+                    self.current.cookies = cookies;
+                }
+            }
             Err(error) => self.toasts.push(
                 format!("Could not reload {}: {error:#}", path.display()),
                 Severity::Error,
@@ -2248,7 +2256,7 @@ mod tests {
     }
 
     #[test]
-    fn self_written_request_file_does_not_clear_the_response() {
+    fn self_written_request_file_with_session_cookies_does_not_clear_the_response() {
         let settings = Settings {
             watch_env_files: false,
             watch_collection_files: true,
@@ -2269,10 +2277,49 @@ mod tests {
         app.open_path(&path);
         assert_eq!(app.current.url, "https://example.com/first");
 
-        // The app's own save produces a Modify event for byte-identical content.
+        let cookie = rusting_core::KeyValue::new("session", "redirect");
+        app.current.cookies.push(cookie.clone());
+        let response = Response {
+            status: 302,
+            reason: "Found".to_owned(),
+            url: "https://example.com/first".to_owned(),
+            headers: Vec::new(),
+            cookies: vec![cookie.clone()],
+            body: b"redirect response".to_vec(),
+            timings: Timings::default(),
+            sent: rusting_http::types::SentRequest::default(),
+        };
+        app.url_bar.set_response(response.status, &response.reason);
+        app.response_pane
+            .set_response(&response, &Settings::default());
+
+        collection::save_request(&app.current).unwrap();
+        assert!(load_request(&path).unwrap().cookies.is_empty());
+
+        // The saved YAML has no serde-skipped cookies, but is otherwise the app's own write.
         app.send_generation = 7;
         app.handle_files_changed(vec![path.clone()]);
         assert_eq!(app.send_generation, 7);
+        assert_eq!(app.current.cookies, vec![cookie.clone()]);
+        assert!(app.response_pane.has_response());
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buffer = Buffer::empty(area);
+        app.url_bar.render(
+            area,
+            &mut buffer,
+            true,
+            &Settings::default(),
+            app.environment.variables(),
+            &[],
+        );
+        let rendered = buffer
+            .content()
+            .iter()
+            .fold(String::new(), |mut rendered, cell| {
+                rendered.push_str(cell.symbol());
+                rendered
+            });
+        assert!(rendered.contains("302"));
 
         // A genuine external edit is still picked up.
         let edited = RequestModel {
@@ -2283,7 +2330,9 @@ mod tests {
         app.handle_files_changed(vec![path.clone()]);
         assert_eq!(app.send_generation, 8);
         assert_eq!(app.current.url, "https://example.com/second");
+        assert_eq!(app.current.cookies, vec![cookie]);
     }
+
     #[test]
     fn external_handoffs_request_repaint_on_success_and_failure() {
         let settings = Settings {
