@@ -120,6 +120,14 @@ impl KeyValueEditor {
     /// Start idle traversal at the first existing row, or at the key input
     /// when empty. An in-progress add or edit keeps its draft.
     pub fn focus_first_control(&mut self) {
+        if self.allow_add
+            && matches!(self.mode, Mode::Adding)
+            && self.key.is_empty()
+            && self.value.is_empty()
+        {
+            self.mode = Mode::Idle;
+        }
+
         if self.allow_add && matches!(self.mode, Mode::Idle) && self.table.selected().is_some() {
             self.table.set_cursor(0);
             self.focus = Focus::Table;
@@ -708,15 +716,48 @@ mod tests {
         );
 
         editor.key.set_value("draft");
-        editor.value.set_value("pending");
         editor.focus = Focus::Button;
         editor.focus_first_control();
 
         assert_eq!(editor.focus, Focus::Key);
         assert!(matches!(editor.mode, Mode::Adding));
         assert_eq!(editor.key.value(), "draft");
-        assert_eq!(editor.value.value(), "pending");
+        assert!(editor.value.is_empty());
         assert_eq!(editor.rows(), &[KeyValue::new("saved", "row")]);
+    }
+
+    #[test]
+    fn focus_first_control_returns_blank_post_add_state_to_existing_rows() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.focus_first_control();
+        editor.key.set_value("first");
+        editor.value.set_value("one");
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+        editor.key.set_value("second");
+        editor.value.set_value("two");
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+        assert!(matches!(editor.mode, Mode::Adding));
+        assert!(editor.key.is_empty());
+        assert!(editor.value.is_empty());
+
+        editor.focus_first_control();
+
+        assert_eq!(editor.focus, Focus::Table);
+        assert!(matches!(editor.mode, Mode::Idle));
+        assert_eq!(editor.table.cursor(), 0);
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Char('j')), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(editor.focus, Focus::Table);
+        assert_eq!(editor.table.cursor(), 1);
     }
 
     #[test]
