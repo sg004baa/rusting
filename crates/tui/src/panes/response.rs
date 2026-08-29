@@ -6,7 +6,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget as _};
-use rusting_core::Settings;
+use rusting_core::{KeyValue, Settings};
 use rusting_http::{PhaseOutcome, SentRequest, Timings};
 use rusting_script::{HookStatus, LogLine, Stream};
 
@@ -14,7 +14,6 @@ use crate::panes::body::{EditorFooter, FooterAction};
 use crate::theme;
 use crate::widgets::editor::{Editor, EditorAction};
 use crate::widgets::syntax::Language;
-use crate::widgets::table::{KeyValueTable, TableAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseTab {
@@ -90,8 +89,8 @@ pub struct ResponsePane {
     meta: Option<ResponseMeta>,
     body: Editor,
     body_footer: EditorFooter,
-    headers: KeyValueTable,
-    cookies: KeyValueTable,
+    headers: Editor,
+    cookies: Editor,
     script_statuses: [(&'static str, HookStatus); 3],
     logs: Vec<LogLine>,
     log_scroll: usize,
@@ -110,16 +109,9 @@ impl ResponsePane {
     pub fn new() -> Self {
         let mut body = Editor::new();
         body.set_read_only(true);
-        let mut sent = Editor::new();
-        sent.set_read_only(true);
-        sent.set_language(None);
-
-        let mut headers = KeyValueTable::read_only(["Header", "Value"]);
-        headers.show_header = true;
-        headers.empty_message = "No headers".to_owned();
-        let mut cookies = KeyValueTable::read_only(["Cookie", "Value"]);
-        cookies.show_header = true;
-        cookies.empty_message = "No cookies".to_owned();
+        let headers = read_only_viewer();
+        let cookies = read_only_viewer();
+        let sent = read_only_viewer();
 
         Self {
             active_tab: ResponseTab::Body,
@@ -182,8 +174,8 @@ impl ResponsePane {
         self.body.set_show_line_numbers(!text.is_empty());
         self.body_footer.sync_from_editor(&self.body);
 
-        self.headers.set_rows(response.headers.clone());
-        self.cookies.set_rows(response.cookies.clone());
+        self.headers.set_text(&format_key_values(&response.headers));
+        self.cookies.set_text(&format_key_values(&response.cookies));
         self.timings = response.timings.clone();
         self.sent.set_text(&format_sent_request(&response.sent));
         self.meta = Some(ResponseMeta {
@@ -217,8 +209,8 @@ impl ResponsePane {
         self.body.set_language(None);
         self.body.set_show_line_numbers(false);
         self.body_footer.sync_from_editor(&self.body);
-        self.headers.clear();
-        self.cookies.clear();
+        self.headers.set_text("");
+        self.cookies.set_text("");
         self.script_statuses = [
             ("Setup", HookStatus::NotConfigured),
             ("Pre-request", HookStatus::NotConfigured),
@@ -295,25 +287,17 @@ impl ResponsePane {
                 EditorAction::Ignored => ResponsePaneAction::Ignored,
                 EditorAction::Consumed | EditorAction::Changed => ResponsePaneAction::Consumed,
             },
-            ResponseTab::Headers => map_table_action(self.headers.handle_key(key), &mut self.focus),
-            ResponseTab::Cookies => map_table_action(self.cookies.handle_key(key), &mut self.focus),
+            ResponseTab::Headers => {
+                handle_read_only_editor(&mut self.headers, &mut self.focus, key)
+            }
+            ResponseTab::Cookies => {
+                handle_read_only_editor(&mut self.cookies, &mut self.focus, key)
+            }
             ResponseTab::Scripts => self.handle_log_key(key),
             ResponseTab::Timings => self.handle_static_key(key),
-            ResponseTab::SentRequest => match self.sent.handle_key(key) {
-                EditorAction::OpenInPager => {
-                    ResponsePaneAction::OpenInPager(self.sent.text(), None)
-                }
-                EditorAction::OpenInEditor => {
-                    ResponsePaneAction::OpenInEditor(self.sent.text(), None)
-                }
-                EditorAction::LeaveUp => {
-                    self.focus = PaneFocus::Tabs;
-                    ResponsePaneAction::Consumed
-                }
-                EditorAction::LeaveDown => ResponsePaneAction::LeaveDown,
-                EditorAction::Ignored => ResponsePaneAction::Ignored,
-                EditorAction::Consumed | EditorAction::Changed => ResponsePaneAction::Consumed,
-            },
+            ResponseTab::SentRequest => {
+                handle_read_only_editor(&mut self.sent, &mut self.focus, key)
+            }
         }
     }
 
@@ -392,8 +376,20 @@ impl ResponsePane {
         let content_focused = focused && self.focus == PaneFocus::Content;
         match self.active_tab {
             ResponseTab::Body => self.render_body(content, buffer, content_focused),
-            ResponseTab::Headers => self.headers.render(content, buffer, content_focused),
-            ResponseTab::Cookies => self.cookies.render(content, buffer, content_focused),
+            ResponseTab::Headers => render_read_only_editor(
+                &mut self.headers,
+                "No headers",
+                content,
+                buffer,
+                content_focused,
+            ),
+            ResponseTab::Cookies => render_read_only_editor(
+                &mut self.cookies,
+                "No cookies",
+                content,
+                buffer,
+                content_focused,
+            ),
             ResponseTab::Scripts => self.render_scripts(content, buffer),
             ResponseTab::Timings => self.render_timings(content, buffer),
             ResponseTab::SentRequest => {
@@ -591,20 +587,44 @@ impl ResponsePane {
     }
 }
 
-fn map_table_action(action: TableAction, focus: &mut PaneFocus) -> ResponsePaneAction {
-    match action {
-        TableAction::LeaveUp => {
+fn read_only_viewer() -> Editor {
+    let mut editor = Editor::new();
+    editor.set_read_only(true);
+    editor.set_language(None);
+    editor.set_soft_wrap(true);
+    editor.set_show_line_numbers(false);
+    editor
+}
+
+fn handle_read_only_editor(
+    editor: &mut Editor,
+    focus: &mut PaneFocus,
+    key: KeyEvent,
+) -> ResponsePaneAction {
+    match editor.handle_key(key) {
+        EditorAction::OpenInPager => ResponsePaneAction::OpenInPager(editor.text(), None),
+        EditorAction::OpenInEditor => ResponsePaneAction::OpenInEditor(editor.text(), None),
+        EditorAction::LeaveUp => {
             *focus = PaneFocus::Tabs;
             ResponsePaneAction::Consumed
         }
-        TableAction::LeaveDown => ResponsePaneAction::LeaveDown,
-        TableAction::Ignored => ResponsePaneAction::Ignored,
-        TableAction::Consumed
-        | TableAction::EditKey
-        | TableAction::EditValue
-        | TableAction::Removed
-        | TableAction::Toggled
-        | TableAction::Copy => ResponsePaneAction::Consumed,
+        EditorAction::LeaveDown => ResponsePaneAction::LeaveDown,
+        EditorAction::Ignored => ResponsePaneAction::Ignored,
+        EditorAction::Consumed | EditorAction::Changed => ResponsePaneAction::Consumed,
+    }
+}
+
+fn render_read_only_editor(
+    editor: &mut Editor,
+    empty_message: &str,
+    area: Rect,
+    buffer: &mut Buffer,
+    focused: bool,
+) {
+    if editor.is_empty() {
+        render_centered(empty_message, area, buffer);
+    } else {
+        editor.render(area, buffer, focused);
     }
 }
 
@@ -619,16 +639,29 @@ fn hook_status(status: &HookStatus) -> (&'static str, Style) {
     }
 }
 
+fn format_key_values(rows: &[KeyValue]) -> String {
+    let capacity = rows
+        .iter()
+        .map(|row| row.name.len() + row.value.len() + 2)
+        .sum::<usize>()
+        + rows.len().saturating_sub(1);
+    let mut text = String::with_capacity(capacity);
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(&row.name);
+        text.push_str(": ");
+        text.push_str(&row.value);
+    }
+    text
+}
+
 fn format_sent_request(request: &SentRequest) -> String {
     let headers = if request.headers.is_empty() {
         "(no headers)".to_owned()
     } else {
-        request
-            .headers
-            .iter()
-            .map(|header| format!("{}: {}", header.name, header.value))
-            .collect::<Vec<_>>()
-            .join("\n")
+        format_key_values(&request.headers)
     };
     let body = request.body.as_deref().unwrap_or("(empty body)");
     format!(
@@ -752,16 +785,147 @@ mod tests {
 
     #[test]
     fn response_populates_headers_cookies_language_and_sent_request() {
+        let mut response = response(b"ok", Some("text/html"));
+        response
+            .headers
+            .push(KeyValue::new("X-Second", "exact value"));
+        response.cookies.push(KeyValue::new("theme", "light mode"));
         let mut pane = ResponsePane::new();
-        pane.set_response(&response(b"ok", Some("text/html")), &Settings::default());
+        pane.set_response(&response, &Settings::default());
         assert!(pane.has_response());
-        assert_eq!(pane.headers.rows()[0].name, "Content-Type");
-        assert_eq!(pane.cookies.rows()[0].name, "sid");
+        assert_eq!(
+            pane.headers.text(),
+            "Content-Type: text/html\nX-Second: exact value"
+        );
+        assert_eq!(pane.cookies.text(), "sid: abc\ntheme: light mode");
         assert_eq!(pane.body.language(), Some(Language::Html));
         let sent = pane.sent.text();
         assert!(sent.starts_with("POST https://example.test/items?q=1"));
         assert!(sent.contains("Headers\nX-Test: yes"));
         assert!(sent.ends_with("Body\npayload"));
+    }
+
+    #[test]
+    fn header_and_cookie_editors_soft_wrap_long_rows_in_narrow_content() {
+        let value = "0123456789abcdefghijkl";
+        let mut response = response(b"ok", None);
+        response.headers = vec![KeyValue::new("X-Long", value)];
+        response.cookies = vec![KeyValue::new("Cookie", value)];
+        let mut pane = ResponsePane::new();
+        pane.set_response(&response, &Settings::default());
+        let area = Rect::new(0, 0, 18, 7);
+
+        for (tab, first_row) in [
+            (ResponseTab::Headers, "X-Long: 01234567"),
+            (ResponseTab::Cookies, "Cookie: 01234567"),
+        ] {
+            pane.set_active_tab(tab);
+            let editor = match tab {
+                ResponseTab::Headers => &pane.headers,
+                ResponseTab::Cookies => &pane.cookies,
+                _ => unreachable!(),
+            };
+            assert!(editor.soft_wrap());
+            assert!(editor.read_only());
+            assert!(!editor.show_line_numbers());
+
+            let mut buffer = Buffer::empty(area);
+            pane.render(area, &mut buffer, true, &Settings::default());
+            let first = (1..17).map(|x| buffer[(x, 2)].symbol()).collect::<String>();
+            let second = (1..17).map(|x| buffer[(x, 3)].symbol()).collect::<String>();
+            assert_eq!(first, first_row);
+            assert_eq!(second.trim_end(), "89abcdefghijkl");
+        }
+    }
+
+    #[test]
+    fn header_and_cookie_editors_support_visual_yank_and_external_actions() {
+        let mut pane = ResponsePane::new();
+        pane.set_response(&response(b"ok", Some("text/plain")), &Settings::default());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        for (tab, text, first_character) in [
+            (ResponseTab::Headers, "Content-Type: text/plain", "C"),
+            (ResponseTab::Cookies, "sid: abc", "s"),
+        ] {
+            pane.set_active_tab(tab);
+            pane.focus_tab_bar();
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Down)),
+                ResponsePaneAction::Consumed
+            );
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Char('v'))),
+                ResponsePaneAction::Consumed
+            );
+            assert!(match tab {
+                ResponseTab::Headers => pane.headers.visual_mode(),
+                ResponseTab::Cookies => pane.cookies.visual_mode(),
+                _ => unreachable!(),
+            });
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Right)),
+                ResponsePaneAction::Consumed
+            );
+            assert_eq!(
+                match tab {
+                    ResponseTab::Headers => pane.headers.selected_text(),
+                    ResponseTab::Cookies => pane.cookies.selected_text(),
+                    _ => unreachable!(),
+                }
+                .as_deref(),
+                Some(first_character)
+            );
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Char('y'))),
+                ResponsePaneAction::Consumed
+            );
+            assert!(!match tab {
+                ResponseTab::Headers => pane.headers.visual_mode(),
+                ResponseTab::Cookies => pane.cookies.visual_mode(),
+                _ => unreachable!(),
+            });
+            assert_eq!(
+                pane.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
+                ResponsePaneAction::OpenInPager(text.to_owned(), None)
+            );
+            assert_eq!(
+                pane.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL,)),
+                ResponsePaneAction::OpenInEditor(text.to_owned(), None)
+            );
+        }
+    }
+
+    #[test]
+    fn header_and_cookie_editor_edges_return_to_tabs_and_leave_the_pane() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        for tab in [ResponseTab::Headers, ResponseTab::Cookies] {
+            let mut pane = ResponsePane::new();
+            pane.set_response(&response(b"ok", Some("text/plain")), &Settings::default());
+            pane.set_active_tab(tab);
+
+            for (enter, leave) in [
+                (KeyCode::Down, KeyCode::Up),
+                (KeyCode::Char('j'), KeyCode::Char('k')),
+                (KeyCode::Enter, KeyCode::Up),
+            ] {
+                assert!(pane.tab_bar_focused());
+                assert_eq!(pane.handle_key(key(enter)), ResponsePaneAction::Consumed);
+                assert!(!pane.tab_bar_focused());
+                assert_eq!(pane.handle_key(key(leave)), ResponsePaneAction::Consumed);
+                assert!(pane.tab_bar_focused());
+            }
+
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Down)),
+                ResponsePaneAction::Consumed
+            );
+            assert_eq!(
+                pane.handle_key(key(KeyCode::Down)),
+                ResponsePaneAction::LeaveDown
+            );
+        }
     }
 
     #[test]
@@ -838,12 +1002,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_body_and_unsent_tabs_explain_their_state() {
+    fn empty_response_tabs_explain_their_state() {
         let mut pane = ResponsePane::new();
         let area = Rect::new(0, 0, 70, 12);
         let mut buffer = Buffer::empty(area);
         pane.render(area, &mut buffer, true, &Settings::default());
         assert!(rendered_text(&buffer).contains("No response body"));
+
+        for (tab, message) in [
+            (ResponseTab::Headers, "No headers"),
+            (ResponseTab::Cookies, "No cookies"),
+        ] {
+            pane.set_active_tab(tab);
+            let mut buffer = Buffer::empty(area);
+            pane.render(area, &mut buffer, true, &Settings::default());
+            assert!(rendered_text(&buffer).contains(message));
+        }
 
         pane.set_active_tab(ResponseTab::Timings);
         let mut buffer = Buffer::empty(area);
