@@ -62,7 +62,7 @@ use crate::{
         url_bar::{UrlBar, UrlBarAction},
     },
     theme,
-    widgets::syntax::Language,
+    widgets::{clipboard::Clipboard, syntax::Language},
 };
 
 struct SendFinished {
@@ -175,6 +175,7 @@ pub struct App {
     dirty: bool,
     modal: Option<ActiveModal>,
     toasts: Toasts,
+    clipboard: Clipboard,
     script_engine: Engine,
     script_statuses: [HookStatus; 3],
     script_logs: Vec<LogLine>,
@@ -237,6 +238,7 @@ impl App {
             dirty: false,
             modal: None,
             toasts,
+            clipboard: Clipboard::default(),
             script_engine,
             script_statuses: std::array::from_fn(|_| HookStatus::NotConfigured),
             script_logs: Vec::new(),
@@ -1566,9 +1568,7 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self, text: &str) {
-        match arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
-        {
+        match self.clipboard.set_text(text.to_owned()) {
             Ok(()) => self
                 .toasts
                 .push("Copied to clipboard", Severity::Information),

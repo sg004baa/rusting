@@ -8,6 +8,7 @@ pub use highlight::Highlight;
 pub use input::{Input, InputAction};
 pub use table::{EdgeBehaviour, KeyValueTable, TableAction};
 pub mod checkbox;
+pub(crate) mod clipboard;
 pub mod editor;
 pub mod fuzzy;
 pub mod popup;
