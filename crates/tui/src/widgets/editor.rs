@@ -12,7 +12,10 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme;
-use crate::widgets::syntax::{Highlighter, Language};
+use crate::widgets::{
+    clipboard::Clipboard,
+    syntax::{Highlighter, Language},
+};
 
 const INDENT: &str = "  ";
 const MAX_UNDO: usize = 50;
@@ -76,6 +79,7 @@ pub struct Editor {
     edit_group: Option<EditKind>,
     error: Option<String>,
     highlighter: Highlighter,
+    clipboard: Clipboard,
 }
 
 impl Editor {
@@ -98,6 +102,7 @@ impl Editor {
             edit_group: None,
             error: None,
             highlighter: Highlighter::new(),
+            clipboard: Clipboard::default(),
         }
     }
 
@@ -186,6 +191,11 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let command_mode = self.read_only || self.visual || self.selection().is_some();
+        if key.code == KeyCode::Esc && self.anchor.is_some() {
+            self.visual = false;
+            self.anchor = None;
+            return EditorAction::Consumed;
+        }
 
         if key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::ALT {
             self.end_edit_group();
@@ -564,7 +574,7 @@ impl Editor {
         self.end_edit_group();
         self.error = None;
         let target = self.copy_target();
-        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(target));
+        let result = self.clipboard.set_text(target);
         if let Err(error) = result {
             self.error = Some(error.to_string());
         }
@@ -1056,18 +1066,26 @@ mod tests {
     }
 
     #[test]
-    fn shift_and_visual_movements_extend_selection_and_toggle_collapses_it() {
+    fn escape_clears_visual_and_shift_selections_but_is_otherwise_ignored() {
         let mut editor = Editor::new();
         editor.set_text("abcd");
-        editor.handle_key(modified(KeyCode::Right, KeyModifiers::SHIFT));
-        assert_eq!(editor.selected_text().as_deref(), Some("a"));
+
         editor.handle_key(key(KeyCode::Char('v')));
-        assert!(editor.visual_mode());
         editor.handle_key(key(KeyCode::Right));
-        assert_eq!(editor.selected_text().as_deref(), Some("ab"));
-        editor.handle_key(key(KeyCode::Char('v')));
+        assert!(editor.visual_mode());
+        assert_eq!(editor.selected_text().as_deref(), Some("a"));
+        assert_eq!(editor.handle_key(key(KeyCode::Esc)), EditorAction::Consumed);
         assert!(!editor.visual_mode());
         assert_eq!(editor.selected_text(), None);
+        assert_eq!(editor.text(), "abcd");
+        assert_eq!(editor.cursor_display(), (1, 2));
+        assert_eq!(editor.handle_key(key(KeyCode::Esc)), EditorAction::Ignored);
+
+        editor.handle_key(modified(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(editor.selected_text().as_deref(), Some("b"));
+        assert_eq!(editor.handle_key(key(KeyCode::Esc)), EditorAction::Consumed);
+        assert_eq!(editor.selected_text(), None);
+        assert_eq!(editor.cursor_display(), (1, 3));
     }
 
     #[test]
