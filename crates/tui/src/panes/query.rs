@@ -5,7 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use rusting_core::{KeyValue, RequestModel, Variables};
 
-use crate::panes::key_value::{KeyValueAction, KeyValueEditor};
+use crate::panes::key_value::{KeyValueAction, KeyValueEditor, KeyValueField};
 
 pub struct QueryTab {
     editor: KeyValueEditor,
@@ -44,6 +44,14 @@ impl QueryTab {
 
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> KeyValueAction {
         self.editor.handle_key(key, variables)
+    }
+
+    pub fn apply_external_edit(
+        &mut self,
+        field: KeyValueField,
+        text: &str,
+    ) -> Result<(), String> {
+        self.editor.apply_external_edit(field, text)
     }
 
     pub fn render(
