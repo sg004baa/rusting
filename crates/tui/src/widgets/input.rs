@@ -290,6 +290,16 @@ impl Input {
         while self.width_between(self.scroll, self.cursor) > budget && self.scroll < self.cursor {
             self.scroll = self.next_boundary(self.scroll);
         }
+        // Pull the window back as the caret moves left or text is deleted.
+        // Without this, `scroll` only ever advances (unless the caret crosses
+        // it), leaving stale empty space while the hidden prefix stays hidden.
+        while self.scroll > 0 {
+            let previous = self.previous_boundary(self.scroll);
+            if self.width_between(previous, self.cursor) > budget {
+                break;
+            }
+            self.scroll = previous;
+        }
         self.scroll = self.clamp_boundary(self.scroll);
     }
 
@@ -604,6 +614,20 @@ mod tests {
     }
 
     #[test]
+    fn backspace_clears_a_full_selection() {
+        let mut input = typed("existing value");
+        input.select_all();
+
+        assert_eq!(
+            input.handle_key(key(KeyCode::Backspace)),
+            InputAction::Changed
+        );
+        assert!(input.is_empty());
+        assert_eq!(input.cursor(), 0);
+        assert_eq!(input.selection(), None);
+    }
+
+    #[test]
     fn word_motions_skip_whitespace_then_the_word() {
         let mut input = typed("alpha beta gamma");
         input.handle_key(with(KeyCode::Left, KeyModifiers::CONTROL));
@@ -702,6 +726,20 @@ mod tests {
         // The caret is at the end, so the tail is what shows.
         assert!(rendered.ends_with(' '), "caret cell: {rendered:?}");
         assert!(rendered.starts_with("hij"), "{rendered:?}");
+    }
+
+    #[test]
+    fn backward_edits_reveal_the_hidden_unicode_prefix() {
+        let mut input = typed("日本語入力");
+        render_to_string(&mut input, 7, true);
+        assert_eq!(&input.value()[input.scroll..], "語入力");
+
+        input.handle_key(key(KeyCode::Backspace));
+        render_to_string(&mut input, 7, true);
+        assert_eq!(&input.value()[input.scroll..], "本語入");
+        input.handle_key(key(KeyCode::Left));
+        render_to_string(&mut input, 7, true);
+        assert_eq!(input.scroll, 0);
     }
 
     #[test]

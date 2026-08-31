@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use rusting_core::{KeyValue, RequestModel, Variables, header_names};
 
-use crate::panes::key_value::{KeyValueAction, KeyValueEditor};
+use crate::panes::key_value::{KeyValueAction, KeyValueEditor, KeyValueField};
 use crate::theme;
 
 pub struct HeadersTab {
@@ -51,6 +51,14 @@ impl HeadersTab {
 
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> KeyValueAction {
         self.editor.handle_key(key, variables)
+    }
+
+    pub fn apply_external_edit(
+        &mut self,
+        field: KeyValueField,
+        text: &str,
+    ) -> Result<(), String> {
+        self.editor.apply_external_edit(field, text)
     }
 
     pub fn render(
