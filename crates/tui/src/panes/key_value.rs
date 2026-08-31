@@ -450,11 +450,7 @@ impl KeyValueEditor {
         }
     }
 
-    pub fn apply_external_edit(
-        &mut self,
-        field: KeyValueField,
-        text: &str,
-    ) -> Result<(), String> {
+    pub fn apply_external_edit(&mut self, field: KeyValueField, text: &str) -> Result<(), String> {
         if !self.is_editing() {
             return Err("No key/value draft is currently being edited.".to_owned());
         }

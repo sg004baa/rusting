@@ -46,11 +46,7 @@ impl QueryTab {
         self.editor.handle_key(key, variables)
     }
 
-    pub fn apply_external_edit(
-        &mut self,
-        field: KeyValueField,
-        text: &str,
-    ) -> Result<(), String> {
+    pub fn apply_external_edit(&mut self, field: KeyValueField, text: &str) -> Result<(), String> {
         self.editor.apply_external_edit(field, text)
     }
 
