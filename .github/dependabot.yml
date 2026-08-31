@@ -25,3 +25,7 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # This action's tag is the Rust toolchain version, not an action release.
+      # Keep it aligned with rust-toolchain.toml instead of auto-updating it.
+      - dependency-name: dtolnay/rust-toolchain
