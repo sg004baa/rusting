@@ -57,7 +57,7 @@ use crate::{
     notify::Toasts,
     panes::{
         collection::{CollectionAction, CollectionPane},
-        request::{RequestPane, RequestPaneAction, RequestTab},
+        request::{KeyValueEditTarget, RequestPane, RequestPaneAction, RequestTab},
         response::{ResponsePane, ResponsePaneAction, ResponseTab},
         url_bar::{UrlBar, UrlBarAction},
     },
@@ -709,6 +709,9 @@ impl App {
             RequestPaneAction::OpenInEditor(contents, language) => {
                 self.edit_request_contents(&contents, language);
             }
+            RequestPaneAction::OpenKeyValueInEditor { target, contents } => {
+                self.edit_key_value_contents(target, &contents);
+            }
             RequestPaneAction::OpenPathInPager(path) => self.page_path(&path),
             RequestPaneAction::OpenPathInEditor(path) => self.edit_script_path(&path),
             RequestPaneAction::CopyRequested => {
@@ -776,7 +779,7 @@ impl App {
                 };
                 match self.run_external(|| external::edit_in_external(&command, &current, None)) {
                     Ok(edited) => {
-                        self.url_bar.set_url(edited.trim_end_matches(['\r', '\n']));
+                        self.url_bar.set_url(trim_external_single_line(&edited));
                         self.request_pane
                             .sync_path_params_from_url(self.url_bar.url());
                         self.dirty = true;
@@ -812,6 +815,27 @@ impl App {
                 Ok(()) => self.dirty = true,
                 Err(error) => self.toasts.push(error, Severity::Error),
             },
+            Err(error) => self
+                .toasts
+                .push(format!("Editor failed: {error:#}"), Severity::Error),
+        }
+    }
+
+    fn edit_key_value_contents(&mut self, target: KeyValueEditTarget, contents: &str) {
+        let Some(command) = self.settings.editor.clone() else {
+            self.toasts.push("No editor is configured", Severity::Error);
+            return;
+        };
+        let result = self.run_external(|| external::edit_in_external(&command, contents, None));
+        match result {
+            Ok(edited) => {
+                if let Err(error) = self
+                    .request_pane
+                    .apply_key_value_external_edit(target, trim_external_single_line(&edited))
+                {
+                    self.toasts.push(error, Severity::Error);
+                }
+            }
             Err(error) => self
                 .toasts
                 .push(format!("Editor failed: {error:#}"), Severity::Error),
@@ -1943,6 +1967,10 @@ impl TerminalGuard {
     }
 }
 
+fn trim_external_single_line(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal_best_effort();
@@ -1992,6 +2020,14 @@ where
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, buffer::Buffer};
+
+    #[test]
+    fn single_line_external_edits_trim_only_trailing_line_endings() {
+        assert_eq!(
+            trim_external_single_line("first\nsecond \r\n\n"),
+            "first\nsecond "
+        );
+    }
 
     #[test]
     fn path_comparison_accepts_identical_nonexistent_paths() {
