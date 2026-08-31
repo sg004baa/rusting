@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 use rusting_core::{KeyValue, PathParam, RequestModel, Variables, urls};
 
-use crate::panes::key_value::{KeyValueAction, KeyValueEditor};
+use crate::panes::key_value::{KeyValueAction, KeyValueEditor, KeyValueField};
 
 const EMPTY_MESSAGE: &str =
     "No path parameters in URL\nUse :param syntax to add them\ne.g. http://example.com/:foo/:bar";
@@ -18,7 +18,14 @@ pub enum PathAction {
     Ignored,
     Consumed,
     Changed,
-    Renamed { old: String, new: String },
+    Renamed {
+        old: String,
+        new: String,
+    },
+    OpenInEditor {
+        field: KeyValueField,
+        contents: String,
+    },
     JumpToUrl(String),
     LeaveUp,
     LeaveDown,
@@ -91,6 +98,10 @@ impl PathTab {
         self.editor.focus_last_control();
     }
 
+    pub fn apply_external_edit(&mut self, field: KeyValueField, text: &str) -> Result<(), String> {
+        self.editor.apply_external_edit(field, text)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, variables: &Variables) -> PathAction {
         if key.code == KeyCode::Down && key.modifiers.contains(KeyModifiers::ALT) {
             return self
@@ -103,6 +114,9 @@ impl PathTab {
         let before = self.editor.table.selected().cloned();
         match self.editor.handle_key(key, variables) {
             KeyValueAction::Ignored => PathAction::Ignored,
+            KeyValueAction::OpenInEditor { field, contents } => {
+                PathAction::OpenInEditor { field, contents }
+            }
             KeyValueAction::Consumed | KeyValueAction::CopyRequested => PathAction::Consumed,
             KeyValueAction::LeaveUp => PathAction::LeaveUp,
             KeyValueAction::LeaveDown => PathAction::LeaveDown,
