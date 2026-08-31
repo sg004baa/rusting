@@ -256,9 +256,7 @@ impl RequestPane {
     ) -> Result<(), String> {
         match target.tab {
             RequestTab::Headers => self.headers.apply_external_edit(target.field, text),
-            RequestTab::Body => self
-                .body
-                .apply_key_value_external_edit(target.field, text),
+            RequestTab::Body => self.body.apply_key_value_external_edit(target.field, text),
             RequestTab::Path => self.path.apply_external_edit(target.field, text),
             RequestTab::Query => self.query.apply_external_edit(target.field, text),
             tab => Err(format!(
