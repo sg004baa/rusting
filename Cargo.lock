@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "rusting"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "rusting-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "directories",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "rusting-http"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "rusting-openapi"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "rusting-core",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "rusting-script"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "rquickjs",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "rusting-tui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arboard",
