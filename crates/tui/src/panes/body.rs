@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget as _};
 use rusting_core::{BodyContent, RequestModel, Variables};
 
-use crate::panes::key_value::{KeyValueAction, KeyValueEditor};
+use crate::panes::key_value::{KeyValueAction, KeyValueEditor, KeyValueField};
 use crate::theme;
 use crate::widgets::checkbox::{Checkbox, CheckboxAction};
 use crate::widgets::editor::{Editor, EditorAction};
@@ -21,13 +21,17 @@ pub enum BodyKind {
     Form,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyAction {
     Ignored,
     Consumed,
     Changed,
     OpenInPager,
     OpenInEditor,
+    OpenKeyValueInEditor {
+        field: KeyValueField,
+        contents: String,
+    },
     CopyRequested,
     LeaveUp,
     LeaveDown,
@@ -368,6 +372,9 @@ impl BodyTab {
             },
             BodyKind::Form => match self.form.handle_key(key, variables) {
                 KeyValueAction::Ignored => BodyAction::Ignored,
+                KeyValueAction::OpenInEditor { field, contents } => {
+                    BodyAction::OpenKeyValueInEditor { field, contents }
+                }
                 KeyValueAction::Consumed => BodyAction::Consumed,
                 KeyValueAction::Changed => BodyAction::Changed,
                 KeyValueAction::CopyRequested => BodyAction::CopyRequested,
@@ -457,6 +464,17 @@ impl BodyTab {
         }
         self.raw.set_text(text);
         true
+    }
+
+    pub(crate) fn apply_key_value_external_edit(
+        &mut self,
+        field: KeyValueField,
+        text: &str,
+    ) -> Result<(), String> {
+        if *self.kind.value() != BodyKind::Form {
+            return Err("The current Body mode does not contain key/value fields.".to_owned());
+        }
+        self.form.apply_external_edit(field, text)
     }
 }
 

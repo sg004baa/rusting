@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -18,10 +18,20 @@ use crate::widgets::popup::{Popup, PopupAction, PopupItem};
 use crate::widgets::table::{KeyValueTable, TableAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyValueField {
+    Key,
+    Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyValueAction {
     Ignored,
     Consumed,
     Changed,
+    OpenInEditor {
+        field: KeyValueField,
+        contents: String,
+    },
     CopyRequested,
     LeaveUp,
     LeaveDown,
@@ -136,11 +146,15 @@ impl KeyValueEditor {
             if matches!(self.mode, Mode::Idle) {
                 self.mode = Mode::Adding;
             }
-            self.focus = Focus::Key;
+            if matches!(self.mode, Mode::Editing { .. }) {
+                self.focus_input(KeyValueField::Key);
+            } else {
+                self.focus = Focus::Key;
+            }
             self.close_popup();
         } else if self.table.selected().is_some() {
             if matches!(self.mode, Mode::Editing { .. }) {
-                self.focus = Focus::Key;
+                self.focus_input(KeyValueField::Key);
                 self.close_popup();
             } else {
                 self.begin_editing(true);
@@ -156,7 +170,7 @@ impl KeyValueEditor {
             self.focus = Focus::Button;
         } else if self.table.selected().is_some() {
             if matches!(self.mode, Mode::Editing { .. }) {
-                self.focus = Focus::Value;
+                self.focus_input(KeyValueField::Value);
             } else {
                 self.begin_editing(false);
             }
@@ -190,6 +204,16 @@ impl KeyValueEditor {
         if key.code == KeyCode::Esc && self.is_editing() {
             self.cancel_edit();
             return KeyValueAction::Consumed;
+        }
+
+        if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL {
+            let (field, contents) = match self.focus {
+                Focus::Key => (KeyValueField::Key, self.key.value().to_owned()),
+                Focus::Value => (KeyValueField::Value, self.value.value().to_owned()),
+                Focus::Table | Focus::Button => return KeyValueAction::Ignored,
+            };
+            self.close_popup();
+            return KeyValueAction::OpenInEditor { field, contents };
         }
 
         match self.focus {
@@ -250,7 +274,7 @@ impl KeyValueEditor {
         if key.code == KeyCode::Tab {
             self.close_popup();
             if is_key {
-                self.focus = Focus::Value;
+                self.focus_input(KeyValueField::Value);
                 return KeyValueAction::Consumed;
             }
             if self.allow_add {
@@ -264,7 +288,7 @@ impl KeyValueEditor {
             if is_key {
                 return KeyValueAction::LeaveUp;
             }
-            self.focus = Focus::Key;
+            self.focus_input(KeyValueField::Key);
             return KeyValueAction::Consumed;
         }
         if key.code == KeyCode::Down && key.modifiers.is_empty() {
@@ -291,14 +315,14 @@ impl KeyValueEditor {
                 if is_key {
                     self.focus = Focus::Table;
                 } else {
-                    self.focus = Focus::Key;
+                    self.focus_input(KeyValueField::Key);
                 }
                 KeyValueAction::Consumed
             }
             InputAction::LeaveDown => {
                 self.close_popup();
                 if is_key {
-                    self.focus = Focus::Value;
+                    self.focus_input(KeyValueField::Value);
                 } else if self.allow_add {
                     self.focus = Focus::Button;
                 } else {
@@ -315,7 +339,7 @@ impl KeyValueEditor {
         match key.code {
             KeyCode::Enter | KeyCode::Char(' ') => self.commit(),
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.focus = Focus::Value;
+                self.focus_input(KeyValueField::Value);
                 KeyValueAction::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => KeyValueAction::LeaveDown,
@@ -331,9 +355,9 @@ impl KeyValueEditor {
             return self.commit();
         }
         if is_key && !self.key.is_empty() {
-            self.focus = Focus::Value;
+            self.focus_input(KeyValueField::Value);
         } else if !is_key && !self.value.is_empty() {
-            self.focus = Focus::Key;
+            self.focus_input(KeyValueField::Key);
         }
         KeyValueAction::Consumed
     }
@@ -344,11 +368,11 @@ impl KeyValueEditor {
             Mode::Adding | Mode::Idle => !self.key.is_empty() && !self.value.is_empty(),
         };
         if !valid {
-            self.focus = if self.key.is_empty() {
-                Focus::Key
+            if self.key.is_empty() {
+                self.focus_input(KeyValueField::Key);
             } else {
-                Focus::Value
-            };
+                self.focus_input(KeyValueField::Value);
+            }
             return KeyValueAction::Consumed;
         }
         let row = KeyValue::new(self.key.value(), self.value.value());
@@ -402,8 +426,44 @@ impl KeyValueEditor {
             index,
             original: row,
         };
-        self.focus = if key_first { Focus::Key } else { Focus::Value };
+        self.focus_input(if key_first {
+            KeyValueField::Key
+        } else {
+            KeyValueField::Value
+        });
         self.close_popup();
+    }
+    fn focus_input(&mut self, field: KeyValueField) {
+        let select_all = matches!(self.mode, Mode::Editing { .. });
+        let input = match field {
+            KeyValueField::Key => {
+                self.focus = Focus::Key;
+                &mut self.key
+            }
+            KeyValueField::Value => {
+                self.focus = Focus::Value;
+                &mut self.value
+            }
+        };
+        if select_all {
+            input.select_all();
+        }
+    }
+
+    pub fn apply_external_edit(
+        &mut self,
+        field: KeyValueField,
+        text: &str,
+    ) -> Result<(), String> {
+        if !self.is_editing() {
+            return Err("No key/value draft is currently being edited.".to_owned());
+        }
+        match field {
+            KeyValueField::Key => self.key.set_value(text),
+            KeyValueField::Value => self.value.set_value(text),
+        }
+        self.close_popup();
+        Ok(())
     }
 
     fn cancel_edit(&mut self) {
@@ -664,6 +724,66 @@ mod tests {
             KeyValueAction::Changed
         );
         assert_eq!(editor.rows()[0], KeyValue::new("changed", "again"));
+    }
+
+    #[test]
+    fn editing_selects_each_focused_existing_field_and_backspace_clears_it() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.set_rows(vec![KeyValue::new("existing", "old value")]);
+
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Consumed
+        );
+        assert_eq!(editor.key.selection(), Some(0.."existing".len()));
+        editor.handle_key(key(KeyCode::Char('x')), &vars);
+        assert_eq!(editor.key.value(), "x");
+
+        editor.handle_key(key(KeyCode::Tab), &vars);
+        assert_eq!(editor.value.selection(), Some(0.."old value".len()));
+        editor.handle_key(key(KeyCode::Backspace), &vars);
+        assert!(editor.value.is_empty());
+        assert_eq!(editor.key.value(), "x");
+    }
+
+    #[test]
+    fn external_edit_targets_the_focused_draft_without_committing_it() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.set_rows(vec![KeyValue::new("name", "old")]);
+        editor.handle_key(key(KeyCode::Enter), &vars);
+        editor.handle_key(key(KeyCode::Tab), &vars);
+
+        let action = editor.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &vars,
+        );
+        assert_eq!(
+            action,
+            KeyValueAction::OpenInEditor {
+                field: KeyValueField::Value,
+                contents: "old".to_owned(),
+            }
+        );
+        editor
+            .apply_external_edit(KeyValueField::Value, "edited")
+            .unwrap();
+        assert_eq!(editor.rows(), &[KeyValue::new("name", "old")]);
+
+        editor.handle_key(key(KeyCode::Esc), &vars);
+        assert_eq!(editor.rows(), &[KeyValue::new("name", "old")]);
+
+        editor.handle_key(key(KeyCode::Enter), &vars);
+        editor.handle_key(key(KeyCode::Tab), &vars);
+        editor
+            .apply_external_edit(KeyValueField::Value, "committed")
+            .unwrap();
+        assert_eq!(
+            editor.handle_key(key(KeyCode::Enter), &vars),
+            KeyValueAction::Changed
+        );
+        assert_eq!(editor.rows(), &[KeyValue::new("name", "committed")]);
     }
 
     #[test]

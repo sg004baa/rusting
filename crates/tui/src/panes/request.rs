@@ -14,7 +14,7 @@ use crate::panes::auth::{AuthAction, AuthTab};
 use crate::panes::body::{BodyAction, BodyTab};
 use crate::panes::headers::HeadersTab;
 use crate::panes::info::{InfoAction, InfoTab};
-use crate::panes::key_value::KeyValueAction;
+use crate::panes::key_value::{KeyValueAction, KeyValueField};
 use crate::panes::options::{OptionsAction, OptionsTab};
 use crate::panes::path::{PathAction, PathTab};
 use crate::panes::query::QueryTab;
@@ -73,6 +73,12 @@ impl RequestTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyValueEditTarget {
+    pub tab: RequestTab,
+    pub field: KeyValueField,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestPaneAction {
     Ignored,
@@ -80,6 +86,10 @@ pub enum RequestPaneAction {
     Changed,
     OpenInPager(String, Option<Language>),
     OpenInEditor(String, Option<Language>),
+    OpenKeyValueInEditor {
+        target: KeyValueEditTarget,
+        contents: String,
+    },
     OpenPathInEditor(PathBuf),
     OpenPathInPager(PathBuf),
     CopyRequested,
@@ -238,6 +248,26 @@ impl RequestPane {
         }
     }
 
+    /// Applies `$EDITOR` output to the exact key/value draft that requested it.
+    pub fn apply_key_value_external_edit(
+        &mut self,
+        target: KeyValueEditTarget,
+        text: &str,
+    ) -> Result<(), String> {
+        match target.tab {
+            RequestTab::Headers => self.headers.apply_external_edit(target.field, text),
+            RequestTab::Body => self
+                .body
+                .apply_key_value_external_edit(target.field, text),
+            RequestTab::Path => self.path.apply_external_edit(target.field, text),
+            RequestTab::Query => self.query.apply_external_edit(target.field, text),
+            tab => Err(format!(
+                "The {} tab does not contain editable key/value fields.",
+                tab.label()
+            )),
+        }
+    }
+
     /// Selected row for the key/value copy modal, when the active tab has one.
     pub fn copy_target(&self) -> Option<KeyValue> {
         match self.active {
@@ -333,6 +363,15 @@ impl RequestPane {
             BodyAction::OpenInEditor => {
                 RequestPaneAction::OpenInEditor(self.body.raw_text(), self.body.raw_language())
             }
+            BodyAction::OpenKeyValueInEditor { field, contents } => {
+                RequestPaneAction::OpenKeyValueInEditor {
+                    target: KeyValueEditTarget {
+                        tab: RequestTab::Body,
+                        field,
+                    },
+                    contents,
+                }
+            }
             BodyAction::CopyRequested => RequestPaneAction::CopyRequested,
             BodyAction::LeaveUp => {
                 self.tab_bar_focused = true;
@@ -347,6 +386,15 @@ impl RequestPane {
             PathAction::Ignored => RequestPaneAction::Ignored,
             PathAction::Consumed => RequestPaneAction::Consumed,
             PathAction::Changed => RequestPaneAction::Changed,
+            PathAction::OpenInEditor { field, contents } => {
+                RequestPaneAction::OpenKeyValueInEditor {
+                    target: KeyValueEditTarget {
+                        tab: RequestTab::Path,
+                        field,
+                    },
+                    contents,
+                }
+            }
             PathAction::Renamed { old, new } => {
                 let rewritten = rewrite_path_parameter(&self.current_url, &old, &new);
                 self.current_url.clone_from(&rewritten);
@@ -512,6 +560,15 @@ fn map_key_value(action: KeyValueAction, pane: &mut RequestPane) -> RequestPaneA
         KeyValueAction::Ignored => RequestPaneAction::Ignored,
         KeyValueAction::Consumed => RequestPaneAction::Consumed,
         KeyValueAction::Changed => RequestPaneAction::Changed,
+        KeyValueAction::OpenInEditor { field, contents } => {
+            RequestPaneAction::OpenKeyValueInEditor {
+                target: KeyValueEditTarget {
+                    tab: pane.active,
+                    field,
+                },
+                contents,
+            }
+        }
         KeyValueAction::CopyRequested => RequestPaneAction::CopyRequested,
         KeyValueAction::LeaveUp => {
             pane.tab_bar_focused = true;
@@ -560,6 +617,7 @@ fn rewrite_path_parameter(url: &str, old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusting_core::{BodyContent, PathParam};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
@@ -680,6 +738,93 @@ mod tests {
                 "{tab:?} swallowed BackTab or looped"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_e_routes_each_key_value_request_tab_with_its_exact_target() {
+        let variables = Variables::new();
+        let request = RequestModel {
+            headers: vec![KeyValue::new("Header", "header value")],
+            body: Some(BodyContent::Form {
+                form_data: vec![KeyValue::new("Form", "form value")],
+                content_type: Some(BodyContent::FORM_CONTENT_TYPE.to_owned()),
+            }),
+            url: "https://example.test/:Path".to_owned(),
+            path_params: vec![PathParam {
+                name: "Path".to_owned(),
+                value: "path value".to_owned(),
+            }],
+            params: vec![KeyValue::new("Query", "query value")],
+            ..RequestModel::default()
+        };
+
+        for (tab, expected) in [
+            (RequestTab::Headers, "Header"),
+            (RequestTab::Body, "Form"),
+            (RequestTab::Path, "Path"),
+            (RequestTab::Query, "Query"),
+        ] {
+            let mut pane = RequestPane::new(PathBuf::from("."));
+            pane.load(&request);
+            pane.set_active_tab(tab);
+            pane.focus_body();
+            match tab {
+                RequestTab::Body => {
+                    pane.handle_key(key(KeyCode::Tab), &variables);
+                    pane.handle_key(key(KeyCode::Enter), &variables);
+                }
+                RequestTab::Headers | RequestTab::Query => {
+                    pane.handle_key(key(KeyCode::Enter), &variables);
+                }
+                RequestTab::Path => {}
+                _ => unreachable!(),
+            }
+
+            assert_eq!(
+                pane.handle_key(
+                    KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+                    &variables,
+                ),
+                RequestPaneAction::OpenKeyValueInEditor {
+                    target: KeyValueEditTarget {
+                        tab,
+                        field: KeyValueField::Key,
+                    },
+                    contents: expected.to_owned(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn key_value_external_output_stays_draft_until_commit() {
+        let variables = Variables::new();
+        let request = RequestModel {
+            headers: vec![KeyValue::new("old", "value")],
+            ..RequestModel::default()
+        };
+        let mut pane = RequestPane::new(PathBuf::from("."));
+        pane.load(&request);
+        pane.focus_body();
+        pane.handle_key(key(KeyCode::Enter), &variables);
+        let RequestPaneAction::OpenKeyValueInEditor { target, .. } = pane.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &variables,
+        ) else {
+            panic!("key/value editor action");
+        };
+
+        pane.set_active_tab(RequestTab::Query);
+        pane.apply_key_value_external_edit(target, "edited")
+            .unwrap();
+        assert_eq!(pane.to_model(&request).unwrap().headers[0].name, "old");
+
+        pane.set_active_tab(RequestTab::Headers);
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Enter), &variables),
+            RequestPaneAction::Changed
+        );
+        assert_eq!(pane.to_model(&request).unwrap().headers[0].name, "edited");
     }
 
     #[test]
