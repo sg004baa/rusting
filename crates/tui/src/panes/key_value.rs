@@ -744,6 +744,26 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_scrolled_selected_value_renders_without_panicking() {
+        let vars = Variables::new();
+        let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");
+        editor.set_rows(vec![KeyValue::new(
+            "existing",
+            "a value long enough to scroll horizontally",
+        )]);
+        editor.handle_key(key(KeyCode::Enter), &vars);
+        editor.handle_key(key(KeyCode::Tab), &vars);
+
+        let area = Rect::new(0, 0, 30, 6);
+        let mut buffer = Buffer::empty(area);
+        editor.render(area, &mut buffer, true, &vars);
+        editor.handle_key(key(KeyCode::Backspace), &vars);
+        editor.render(area, &mut buffer, true, &vars);
+
+        assert!(editor.value.is_empty());
+    }
+
+    #[test]
     fn external_edit_targets_the_focused_draft_without_committing_it() {
         let vars = Variables::new();
         let mut editor = KeyValueEditor::new(["Key", "Value"], "Add", "empty");

@@ -92,6 +92,7 @@ impl Input {
     /// Moves the caret, clamping to a char boundary inside the value.
     pub fn set_cursor(&mut self, cursor: usize) {
         self.cursor = self.clamp_boundary(cursor);
+        self.scroll = self.scroll.min(self.cursor);
         self.anchor = None;
     }
 
@@ -115,6 +116,7 @@ impl Input {
         let end = self.clamp_boundary(range.end).max(start);
         self.value.replace_range(start..end, text);
         self.cursor = start + text.len();
+        self.scroll = self.scroll.min(self.cursor);
         self.anchor = None;
     }
 
@@ -147,6 +149,7 @@ impl Input {
                 let previous = self.previous_boundary(self.cursor);
                 self.value.replace_range(previous..self.cursor, "");
                 self.cursor = previous;
+                self.scroll = self.scroll.min(self.cursor);
                 InputAction::Changed
             }
             KeyCode::Delete => {
@@ -202,6 +205,7 @@ impl Input {
                 }
                 self.value.replace_range(..self.cursor, "");
                 self.cursor = 0;
+                self.scroll = 0;
                 self.anchor = None;
                 InputAction::Changed
             }
@@ -408,6 +412,7 @@ impl Input {
             self.anchor = None;
         }
         self.cursor = self.clamp_boundary(target);
+        self.scroll = self.scroll.min(self.cursor);
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -419,6 +424,7 @@ impl Input {
         }
         self.value.replace_range(range.clone(), "");
         self.cursor = range.start;
+        self.scroll = self.scroll.min(self.cursor);
         self.anchor = None;
         true
     }
@@ -436,6 +442,7 @@ impl Input {
         }
         self.value.replace_range(start..self.cursor, "");
         self.cursor = start;
+        self.scroll = self.scroll.min(self.cursor);
         InputAction::Changed
     }
 
