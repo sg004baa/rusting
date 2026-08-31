@@ -826,8 +826,7 @@ impl App {
             self.toasts.push("No editor is configured", Severity::Error);
             return;
         };
-        let result =
-            self.run_external(|| external::edit_in_external(&command, contents, None));
+        let result = self.run_external(|| external::edit_in_external(&command, contents, None));
         match result {
             Ok(edited) => {
                 if let Err(error) = self
