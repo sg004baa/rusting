@@ -16,9 +16,9 @@ use rusting_core::KeyValue;
 
 use crate::theme;
 
-/// Glyphs for the enable toggle. A disabled row shows a blank rather than a
-/// cross so the column reads as a checklist.
-const CHECKED: &str = "\u{2714}\u{fe0e}";
+/// ASCII markers keep the backend's cell position in lockstep with terminals;
+/// a disabled row stays blank so the column reads as a checklist.
+const CHECKED: &str = "x";
 const UNCHECKED: &str = " ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +323,7 @@ impl KeyValueTable {
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+    use unicode_width::UnicodeWidthStr as _;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -512,6 +513,15 @@ mod tests {
         assert!(lines[0].contains("n0"), "{lines:?}");
         assert!(lines[0].contains("v0"), "{lines:?}");
         assert!(!lines[1].contains(CHECKED), "disabled row: {lines:?}");
+    }
+
+    #[test]
+    fn toggle_markers_are_unambiguous_single_terminal_cells() {
+        for marker in [CHECKED, UNCHECKED] {
+            assert!(marker.is_ascii(), "{marker:?}");
+            assert_eq!(marker.len(), 1, "{marker:?}");
+            assert_eq!(marker.width(), 1, "{marker:?}");
+        }
     }
 
     #[test]

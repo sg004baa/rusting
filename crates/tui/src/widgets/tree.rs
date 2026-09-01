@@ -101,10 +101,7 @@ impl Tree {
                 }
                 TreeAction::Consumed
             }
-            KeyCode::Enter => self
-                .cursor()
-                .map_or(TreeAction::Consumed, TreeAction::Selected),
-            KeyCode::Char('l') => {
+            KeyCode::Enter | KeyCode::Char('l') => {
                 let Some(index) = self.cursor else {
                     return TreeAction::Consumed;
                 };
@@ -319,10 +316,7 @@ mod tests {
     #[test]
     fn selection_and_expansion_actions_include_the_node_id() {
         let mut tree = tree();
-        assert_eq!(
-            tree.handle_key(key(KeyCode::Enter)),
-            TreeAction::Selected(10)
-        );
+        assert_eq!(tree.handle_key(key(KeyCode::Enter)), TreeAction::Toggle(10));
         assert_eq!(
             tree.handle_key(key(KeyCode::Char('l'))),
             TreeAction::Toggle(10)
@@ -330,6 +324,10 @@ mod tests {
         tree.set_cursor(11);
         assert_eq!(
             tree.handle_key(key(KeyCode::Char('l'))),
+            TreeAction::Selected(11)
+        );
+        assert_eq!(
+            tree.handle_key(key(KeyCode::Enter)),
             TreeAction::Selected(11)
         );
         assert_eq!(

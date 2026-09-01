@@ -1,5 +1,6 @@
 //! The terminal user interface.
 
+mod collection_state;
 pub mod modals;
 pub mod panes;
 pub mod theme;
