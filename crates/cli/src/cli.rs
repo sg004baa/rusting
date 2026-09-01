@@ -95,8 +95,14 @@ async fn run_tui(collection: Option<&Path>, requested_env: &[PathBuf]) -> anyhow
         None => locations::default_collection_directory()?,
     };
     let loaded = Collection::from_directory(&collection_path)?;
-    let app =
-        rusting_tui::app::App::new(settings, environment, loaded.collection, loaded.failures)?;
+    let collection_state_file = locations::collection_browser_state_file().ok();
+    let app = rusting_tui::app::App::new(
+        settings,
+        environment,
+        loaded.collection,
+        loaded.failures,
+        collection_state_file,
+    )?;
     app.run().await
 }
 

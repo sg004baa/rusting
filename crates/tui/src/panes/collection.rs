@@ -127,6 +127,18 @@ impl CollectionPane {
         self.base_urls.clone()
     }
 
+    pub fn restore_collapsed_directories(&mut self, collapsed: &HashSet<PathBuf>) {
+        let selected = self.selected_key();
+        self.expanded.retain(|path| !collapsed.contains(path));
+        self.rebuild(selected);
+    }
+
+    pub fn collapsed_directories(&self) -> impl Iterator<Item = &Path> {
+        self.known_directories
+            .difference(&self.expanded)
+            .map(PathBuf::as_path)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> CollectionAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
             return CollectionAction::NewRequest {
@@ -723,21 +735,22 @@ mod tests {
     }
 
     #[test]
-    fn toggling_a_directory_hides_and_restores_its_descendants() {
+    fn enter_toggles_a_directory_and_preserves_its_selection() {
         let mut pane = CollectionPane::new(&collection());
         let directory = pane.tree.nodes()[1].id;
         pane.tree.set_cursor(directory);
         assert_eq!(
-            pane.handle_key(key(KeyCode::Char(' '))),
+            pane.handle_key(key(KeyCode::Enter)),
             CollectionAction::Consumed
         );
         assert_eq!(pane.tree.nodes().len(), 2);
         assert!(!pane.tree.nodes()[1].expanded);
         assert_eq!(
-            pane.handle_key(key(KeyCode::Char(' '))),
+            pane.handle_key(key(KeyCode::Enter)),
             CollectionAction::Consumed
         );
         assert_eq!(pane.tree.nodes().len(), 3);
+        assert_eq!(pane.tree.cursor(), Some(directory));
     }
 
     #[test]
@@ -750,6 +763,42 @@ mod tests {
         pane.reload(&value);
         assert_eq!(pane.tree.cursor(), Some(directory));
         assert_eq!(pane.tree.nodes().len(), 2);
+    }
+
+    #[test]
+    fn restored_state_filters_stale_directories_and_new_directories_expand_on_reload() {
+        let mut value = collection();
+        let users = value.children[0].path.clone();
+        let stale = value.path.join("removed");
+        let mut pane = CollectionPane::new(&value);
+        pane.restore_collapsed_directories(&HashSet::from([users.clone(), stale]));
+
+        assert_eq!(
+            pane.collapsed_directories().collect::<HashSet<_>>(),
+            HashSet::from([users.as_path()])
+        );
+        assert_eq!(pane.tree.nodes().len(), 2);
+
+        let teams = value.path.join("teams");
+        value.children.push(Collection {
+            path: teams.clone(),
+            name: "teams".to_owned(),
+            requests: vec![request(
+                &teams,
+                "list.posting.yaml",
+                HttpMethod::Get,
+                "https://api.example.com/teams",
+                "",
+            )],
+            children: Vec::new(),
+        });
+        pane.reload(&value);
+
+        assert!(pane.expanded.contains(&teams));
+        assert_eq!(
+            pane.collapsed_directories().collect::<HashSet<_>>(),
+            HashSet::from([users.as_path()])
+        );
     }
 
     #[test]

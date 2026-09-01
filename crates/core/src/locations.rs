@@ -37,6 +37,11 @@ pub fn data_directory() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Optional per-collection collection-browser state.
+pub fn collection_browser_state_file() -> Result<PathBuf> {
+    Ok(data_directory()?.join("collection-browser.json"))
+}
+
 /// The config file, honouring [`CONFIG_FILE_ENV`].
 pub fn config_file() -> Result<PathBuf> {
     if let Some(override_path) = std::env::var_os(CONFIG_FILE_ENV) {

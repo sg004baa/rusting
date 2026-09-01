@@ -46,7 +46,7 @@ use rusting_script::{
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    external,
+    collection_state, external,
     focus::Focus,
     keymap::{Action, Keymap},
     layout::{self, Frames, Section},
@@ -163,6 +163,7 @@ pub struct App {
     settings: Settings,
     environment: Environment,
     collection: Collection,
+    collection_state_file: Option<PathBuf>,
     keymap: Keymap,
     focus: Focus,
     sidebar_visible: bool,
@@ -197,12 +198,18 @@ impl App {
         environment: Environment,
         collection: Collection,
         load_failures: Vec<LoadFailure>,
+        collection_state_file: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let keymap = Keymap::new(&settings.keymap)?;
         let sidebar_visible = settings.collection_browser.show_on_startup;
         let focus = Focus::from_startup(settings.focus.on_startup, sidebar_visible);
         let root = collection.path.clone();
         let mut collection_pane = CollectionPane::new(&collection);
+        if let Some(path) = collection_state_file.as_deref()
+            && let Ok(collapsed) = collection_state::load(path, &root)
+        {
+            collection_pane.restore_collapsed_directories(&collapsed);
+        }
         let mut url_bar = UrlBar::new();
         url_bar.set_base_url_candidates(collection_pane.base_urls());
         let mut request_pane = RequestPane::new(root.clone());
@@ -226,6 +233,7 @@ impl App {
             settings,
             environment,
             collection,
+            collection_state_file,
             keymap,
             focus,
             sidebar_visible,
@@ -253,6 +261,16 @@ impl App {
             event_reader_alive: Arc::new(AtomicBool::new(false)),
             post_external_repaint: false,
         })
+    }
+
+    fn persist_collection_state(&self) {
+        if let Some(path) = self.collection_state_file.as_deref() {
+            let _ = collection_state::save(
+                path,
+                &self.collection.path,
+                self.collection_pane.collapsed_directories(),
+            );
+        }
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
@@ -330,6 +348,7 @@ impl App {
         }
         drop(watcher);
         drop(event_thread);
+        self.persist_collection_state();
         terminal
             .show_cursor()
             .context("could not show terminal cursor")?;
@@ -2063,7 +2082,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         app.request_pane.load(&RequestModel {
             scripts: rusting_core::Scripts {
                 setup: Some("scripts/hooks.js:prepare".to_owned()),
@@ -2212,7 +2231,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         app.set_focus(Focus::ResponseBody);
         app.toggle_focused_section();
         assert_eq!(app.expanded, Some(Section::Response));
@@ -2230,7 +2249,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         app.set_focus(Focus::Collection);
 
         app.accept_palette(
@@ -2252,7 +2271,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         let response = Response {
             status: 200,
             reason: "OK".to_owned(),
@@ -2301,7 +2320,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
 
         let path = root.path().join("probe.posting.yaml");
         let model = RequestModel {
@@ -2379,7 +2398,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
 
         app.run_external(|| Ok(())).unwrap();
         assert!(app.post_external_repaint);
@@ -2401,7 +2420,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         (app, root)
     }
 
@@ -2514,7 +2533,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let collection = Collection::new(root.path());
         let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new()).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
         let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
         let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
