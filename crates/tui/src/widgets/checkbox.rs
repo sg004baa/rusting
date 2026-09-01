@@ -9,7 +9,8 @@ use ratatui::widgets::Widget as _;
 
 use crate::theme;
 
-const CHECKED: &str = "\u{2714}\u{fe0e}";
+// Keep this to one ASCII cell: the terminal backend coalesces adjacent cell writes.
+const CHECKED: &str = "x";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckboxAction {
@@ -82,6 +83,7 @@ impl Checkbox {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+    use unicode_width::UnicodeWidthStr as _;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -121,7 +123,7 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         Checkbox::new("Wrap", true).render(area, &mut buffer, true);
         let rendered = (0..6).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
-        assert_eq!(rendered, "\u{2714}\u{fe0e} Wrap");
+        assert_eq!(rendered, "x Wrap");
         for x in 0..area.width {
             assert_eq!(buffer[(x, 0)].style().bg, Some(Color::Reset));
         }
@@ -130,5 +132,12 @@ mod tests {
         Checkbox::new("Wrap", false).render(area, &mut buffer, false);
         let rendered = (0..6).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
         assert_eq!(rendered, "  Wrap");
+    }
+
+    #[test]
+    fn checked_marker_is_an_unambiguous_single_terminal_cell() {
+        assert!(CHECKED.is_ascii());
+        assert_eq!(CHECKED.len(), 1);
+        assert_eq!(CHECKED.width(), 1);
     }
 }
