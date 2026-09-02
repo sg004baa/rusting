@@ -14,6 +14,7 @@ use crate::widgets::{Input, InputAction};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteItem {
     pub label: String,
+    pub detail: Option<String>,
     pub hint: Option<String>,
     /// Text searched in addition to the visible label, such as a request URL.
     pub search_extra: Option<String>,
@@ -192,11 +193,32 @@ impl Modal for Palette {
             buffer.set_style(row, row_style);
             let item = &self.items[ranked.item_index];
             let hint_width = item.hint.as_deref().map(|hint| hint.width()).unwrap_or(0);
-            let label_limit = usize::from(row.width)
+            let content_limit = usize::from(row.width)
                 .saturating_sub(hint_width)
                 .saturating_sub(2);
-            let line =
-                highlighted_label(&item.label, &ranked.label_positions, label_limit, row_style);
+            let mut line = highlighted_label(
+                &item.label,
+                &ranked.label_positions,
+                content_limit,
+                row_style,
+            );
+            let label_width = line.width();
+            if label_width > 0
+                && let Some(detail) = &item.detail
+            {
+                let detail_style =
+                    row_style.patch(Style::new().fg(theme::MUTED).add_modifier(Modifier::DIM));
+                let detail_line = highlighted_label(
+                    detail,
+                    &[],
+                    content_limit.saturating_sub(label_width).saturating_sub(1),
+                    detail_style,
+                );
+                if !detail_line.spans.is_empty() {
+                    line.spans.push(Span::styled(" ", detail_style));
+                    line.spans.extend(detail_line.spans);
+                }
+            }
             Paragraph::new(line).render(row, buffer);
             if let Some(hint) = &item.hint {
                 let hint_x = row
@@ -256,6 +278,7 @@ mod tests {
     fn item(label: &str, extra: Option<&str>, id: usize) -> PaletteItem {
         PaletteItem {
             label: label.into(),
+            detail: None,
             hint: None,
             search_extra: extra.map(str::to_owned),
             id,
@@ -266,6 +289,23 @@ mod tests {
         for character in text.chars() {
             palette.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
+    }
+
+    fn find_text(buffer: &Buffer, y: u16, text: &str) -> Option<u16> {
+        let symbols = text
+            .chars()
+            .map(|character| character.to_string())
+            .collect::<Vec<_>>();
+        let width = u16::try_from(symbols.len()).ok()?;
+        if width > buffer.area.width {
+            return None;
+        }
+        (buffer.area.left()..=buffer.area.right().saturating_sub(width)).find(|start| {
+            symbols
+                .iter()
+                .enumerate()
+                .all(|(offset, symbol)| buffer[(*start + offset as u16, y)].symbol() == symbol)
+        })
     }
 
     #[test]
@@ -312,5 +352,62 @@ mod tests {
             .iter()
             .any(|cell| cell.symbol() == "C" && cell.style().add_modifier.contains(Modifier::BOLD));
         assert!(has_bold_match);
+    }
+
+    #[test]
+    fn detail_renders_beside_label_in_ghost_style_and_keeps_hint_right_aligned() {
+        let mut palette = Palette::new(
+            "Search requests",
+            vec![PaletteItem {
+                label: "Health".to_owned(),
+                detail: Some("users/admin".to_owned()),
+                hint: Some("GET".to_owned()),
+                search_extra: None,
+                id: 1,
+            }],
+        );
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buffer = Buffer::empty(area);
+
+        palette.render(area, &mut buffer);
+
+        let (y, label_x) = (area.top()..area.bottom())
+            .find_map(|y| find_text(&buffer, y, "Health").map(|x| (y, x)))
+            .expect("rendered label");
+        let detail_x = find_text(&buffer, y, "users/admin").expect("rendered detail");
+        let hint_x = find_text(&buffer, y, "GET").expect("rendered hint");
+        assert_eq!(detail_x, label_x + "Health ".len() as u16);
+        for x in detail_x..detail_x + "users/admin".len() as u16 {
+            let style = buffer[(x, y)].style();
+            assert_eq!(style.fg, Some(theme::MUTED));
+            assert!(style.add_modifier.contains(Modifier::DIM));
+            assert_eq!(style.bg, theme::selection().bg);
+        }
+        let right_border = (area.left()..area.right())
+            .rev()
+            .find(|x| buffer[(*x, y)].symbol() == "│")
+            .expect("right frame border");
+        assert_eq!(hint_x + "GET".len() as u16, right_border);
+    }
+
+    #[test]
+    fn long_detail_and_hint_render_safely_at_narrow_width() {
+        let mut palette = Palette::new(
+            "Search requests",
+            vec![PaletteItem {
+                label: "Very long request name".to_owned(),
+                detail: Some("users/administrators/archive".to_owned()),
+                hint: Some("EXTREMELY-LONG-METHOD".to_owned()),
+                search_extra: None,
+                id: 1,
+            }],
+        );
+        let area = Rect::new(0, 0, 10, 8);
+        let mut buffer = Buffer::empty(area);
+
+        palette.render(area, &mut buffer);
+
+        assert_eq!(buffer.area, area);
+        assert_eq!(buffer.content.len(), usize::from(area.width * area.height));
     }
 }

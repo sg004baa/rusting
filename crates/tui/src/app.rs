@@ -631,7 +631,12 @@ impl App {
             Focus::Url => self.url_bar.focus_url(),
             Focus::Send => self.url_bar.focus_send(),
             Focus::RequestTabs => self.request_pane.focus_tab_bar(),
-            Focus::RequestBody => self.request_pane.focus_body(),
+            Focus::RequestBody => {
+                self.request_pane.focus_body();
+                if self.request_pane.tab_bar_focused() {
+                    self.focus = Focus::RequestTabs;
+                }
+            }
             Focus::ResponseTabs => self.response_pane.focus_tab_bar(),
             Focus::ResponseBody => self.response_pane.focus_body(),
             Focus::Collection => {}
@@ -667,8 +672,7 @@ impl App {
                 }
             }
             CollectionAction::SearchRequested => self.open_search_palette(),
-            CollectionAction::LeaveUp => self.set_focus(Focus::ResponseTabs),
-            CollectionAction::LeaveDown => self.set_focus(Focus::Method),
+            CollectionAction::LeaveUp | CollectionAction::LeaveDown => {}
         }
     }
 
@@ -697,7 +701,12 @@ impl App {
                 self.request_pane.set_active_tab(RequestTab::Path);
                 self.set_focus(Focus::RequestBody);
             }
-            UrlBarAction::LeaveDown => self.set_focus(Focus::RequestTabs),
+            UrlBarAction::LeaveDown
+                if key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.set_focus(Focus::RequestTabs);
+            }
+            UrlBarAction::LeaveDown => {}
         }
         consumed
     }
@@ -707,7 +716,7 @@ impl App {
             .request_pane
             .handle_key(key, self.environment.variables());
         let consumed = !matches!(action, RequestPaneAction::Ignored);
-        self.handle_request_action(action);
+        self.handle_request_action(action, key);
         if self.focus.request_section() {
             self.focus = if self.request_pane.tab_bar_focused() {
                 Focus::RequestTabs
@@ -718,7 +727,7 @@ impl App {
         consumed
     }
 
-    fn handle_request_action(&mut self, action: RequestPaneAction) {
+    fn handle_request_action(&mut self, action: RequestPaneAction, key: KeyEvent) {
         match action {
             RequestPaneAction::Ignored | RequestPaneAction::Consumed => {}
             RequestPaneAction::Changed => self.dirty = true,
@@ -750,8 +759,19 @@ impl App {
                 self.url_bar.focus_url();
                 self.set_focus(Focus::Url);
             }
-            RequestPaneAction::LeaveUp => self.set_focus(Focus::Send),
-            RequestPaneAction::LeaveDown => self.set_focus(Focus::ResponseTabs),
+            RequestPaneAction::LeaveUp
+                if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab
+                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
+                self.set_focus(Focus::Send);
+            }
+            RequestPaneAction::LeaveDown
+                if key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.set_focus(Focus::ResponseTabs);
+            }
+            RequestPaneAction::LeaveUp | RequestPaneAction::LeaveDown => {}
         }
     }
 
@@ -766,17 +786,28 @@ impl App {
             ResponsePaneAction::OpenInEditor(contents, language) => {
                 self.edit_read_only_contents(&contents, language);
             }
-            ResponsePaneAction::LeaveUp => {
+            ResponsePaneAction::LeaveUp
+                if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab
+                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
                 self.request_pane.focus_last_control();
-                self.focus = Focus::RequestBody;
+                self.focus = if self.request_pane.tab_bar_focused() {
+                    Focus::RequestTabs
+                } else {
+                    Focus::RequestBody
+                };
             }
-            ResponsePaneAction::LeaveDown => {
+            ResponsePaneAction::LeaveDown
+                if key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 if self.sidebar_visible {
                     self.set_focus(Focus::Collection);
                 } else {
                     self.set_focus(Focus::Method);
                 }
             }
+            ResponsePaneAction::LeaveUp | ResponsePaneAction::LeaveDown => {}
         }
         if self.focus.response_section() {
             self.focus = if self.response_pane.tab_bar_focused() {
@@ -812,7 +843,7 @@ impl App {
                 let pane_action = self
                     .request_pane
                     .handle_key(key, self.environment.variables());
-                self.handle_request_action(pane_action);
+                self.handle_request_action(pane_action, key);
             }
             Focus::ResponseTabs | Focus::ResponseBody => {
                 let _ = self.handle_response_key(key);
@@ -1504,10 +1535,12 @@ impl App {
             let Some(path) = request.path.clone() else {
                 continue;
             };
+            let detail = search_request_detail(&self.collection.path, &path);
             let id = paths.len();
             paths.push(path);
             items.push(PaletteItem {
                 label: request.name.clone(),
+                detail,
                 hint: Some(request.method.as_str().to_owned()),
                 search_extra: Some(request.url.clone()),
                 id,
@@ -1549,6 +1582,7 @@ impl App {
             PalettePurpose::Search(paths) => {
                 if let Some(path) = paths.get(chosen) {
                     let path = path.clone();
+                    self.collection_pane.select_request(&path);
                     self.open_path(&path);
                 }
             }
@@ -1701,6 +1735,19 @@ impl App {
     }
 }
 
+fn search_request_detail(collection_root: &Path, request_path: &Path) -> Option<String> {
+    let parent = request_path.parent()?;
+    let relative = parent.strip_prefix(collection_root).ok()?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(relative.to_string_lossy().into_owned())
+}
+
 fn command_palette_items(choices: &[CommandChoice]) -> Vec<PaletteItem> {
     choices
         .iter()
@@ -1730,6 +1777,7 @@ fn command_palette_items(choices: &[CommandChoice]) -> Vec<PaletteItem> {
             };
             PaletteItem {
                 label,
+                detail: None,
                 hint,
                 search_extra,
                 id,
@@ -2262,6 +2310,70 @@ mod tests {
     }
 
     #[test]
+    fn search_request_detail_is_relative_and_only_present_below_collection_root() {
+        let root = Path::new("/tmp/apis");
+
+        assert_eq!(
+            search_request_detail(root, &root.join("users/admin/list.posting.yaml")),
+            Some("users/admin".to_owned())
+        );
+        assert_eq!(
+            search_request_detail(root, &root.join("health.posting.yaml")),
+            None
+        );
+        assert_eq!(
+            search_request_detail(root, Path::new("/tmp/other/list.posting.yaml")),
+            None
+        );
+        assert_eq!(search_request_detail(root, Path::new("/")), None);
+        assert_eq!(
+            search_request_detail(root, &root.join("users/../../outside.posting.yaml")),
+            None
+        );
+    }
+
+    #[test]
+    fn search_palette_selection_syncs_collection_cursor_and_preserves_open_focus_policy() {
+        let mut settings = Settings {
+            watch_env_files: false,
+            watch_collection_files: false,
+            ..Settings::default()
+        };
+        settings.focus.on_request_open = Some(RequestOpenFocus::Method);
+        let root = tempfile::tempdir().unwrap();
+        let first_path = root.path().join("first.posting.yaml");
+        let chosen_path = root.path().join("chosen.posting.yaml");
+        let first = RequestModel {
+            name: "first.posting.yaml".to_owned(),
+            path: Some(first_path),
+            ..RequestModel::default()
+        };
+        let chosen = RequestModel {
+            name: "chosen.posting.yaml".to_owned(),
+            path: Some(chosen_path.clone()),
+            ..RequestModel::default()
+        };
+        collection::save_request(&first).unwrap();
+        collection::save_request(&chosen).unwrap();
+        let mut collection = Collection::new(root.path());
+        collection.requests = vec![first, chosen];
+        let environment = Environment::load(Vec::new(), false).unwrap();
+        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
+        app.sidebar_visible = false;
+        app.set_focus(Focus::RequestTabs);
+
+        app.accept_palette(0, PalettePurpose::Search(vec![chosen_path.clone()]));
+
+        assert_eq!(
+            app.collection_pane.selected_request(),
+            Some(chosen_path.as_path())
+        );
+        assert_eq!(app.current.path.as_deref(), Some(chosen_path.as_path()));
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.focus, Focus::Method);
+    }
+
+    #[test]
     fn failed_send_state_clears_the_previous_response_and_status() {
         let settings = Settings {
             watch_env_files: false,
@@ -2524,18 +2636,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tab_moves_url_send_request_and_response_to_collection() {
-        let settings = Settings {
-            watch_env_files: false,
-            watch_collection_files: false,
-            ..Settings::default()
-        };
-        let root = tempfile::tempdir().unwrap();
-        let collection = Collection::new(root.path());
-        let environment = Environment::load(Vec::new(), false).unwrap();
-        let mut app = App::new(settings, environment, collection, Vec::new(), None).unwrap();
-        let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
-        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+    async fn directional_keys_stay_in_the_collection_at_both_boundaries() {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Char('j'),
+        ] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.set_focus(Focus::Collection);
+
+            app.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &finished_tx,
+                &progress_tx,
+            )
+            .await;
+
+            assert_eq!(app.focus, Focus::Collection, "key: {code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn directional_keys_stay_in_the_request_pane_at_both_boundaries() {
+        for code in [KeyCode::Up, KeyCode::Char('k')] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.set_focus(Focus::RequestTabs);
+
+            app.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &finished_tx,
+                &progress_tx,
+            )
+            .await;
+
+            assert_eq!(app.focus, Focus::RequestTabs, "key: {code:?}");
+        }
+
+        for code in [KeyCode::Down, KeyCode::Char('j')] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.request_pane.set_active_tab(RequestTab::Auth);
+            app.set_focus(Focus::RequestBody);
+            app.request_pane.focus_last_control();
+
+            app.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &finished_tx,
+                &progress_tx,
+            )
+            .await;
+
+            assert_eq!(app.focus, Focus::RequestBody, "key: {code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn directional_keys_stay_in_the_response_pane_at_both_boundaries() {
+        for code in [KeyCode::Up, KeyCode::Char('k')] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.set_focus(Focus::ResponseTabs);
+
+            app.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &finished_tx,
+                &progress_tx,
+            )
+            .await;
+
+            assert_eq!(app.focus, Focus::ResponseTabs, "key: {code:?}");
+        }
+
+        for code in [KeyCode::Down, KeyCode::Char('j')] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.set_focus(Focus::ResponseBody);
+
+            for _ in 0..3 {
+                app.handle_key(
+                    KeyEvent::new(code, KeyModifiers::NONE),
+                    &finished_tx,
+                    &progress_tx,
+                )
+                .await;
+                assert_eq!(app.focus, Focus::ResponseBody, "key: {code:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn downward_keys_stay_in_the_url_band() {
+        for (focus, code) in [
+            (Focus::Method, KeyCode::Char('j')),
+            (Focus::Url, KeyCode::Down),
+        ] {
+            let (mut app, _root) = app_for_key_dispatch();
+            let (finished_tx, progress_tx) = key_dispatch_senders();
+            app.set_focus(focus);
+
+            app.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &finished_tx,
+                &progress_tx,
+            )
+            .await;
+
+            assert_eq!(app.focus, focus, "key: {code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_path_tab_skips_request_body_in_both_traversal_directions() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        app.request_pane.set_active_tab(RequestTab::Path);
+        app.set_focus(Focus::RequestTabs);
+
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::ResponseTabs);
+
+        app.handle_key(backtab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::RequestTabs);
+        assert!(app.request_pane.tab_bar_focused());
+    }
+
+    #[tokio::test]
+    async fn tab_and_backtab_traverse_panes_with_or_without_the_collection() {
+        let (mut app, _root) = app_for_key_dispatch();
+        let (finished_tx, progress_tx) = key_dispatch_senders();
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
 
@@ -2554,10 +2787,19 @@ mod tests {
         app.set_focus(Focus::ResponseTabs);
         app.handle_key(tab, &finished_tx, &progress_tx).await;
         assert_eq!(app.focus, Focus::Collection);
+        app.handle_key(backtab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::ResponseTabs);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Collection);
+        app.handle_key(tab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::Method);
+
         app.sidebar_visible = false;
         app.set_focus(Focus::ResponseBody);
         app.handle_key(tab, &finished_tx, &progress_tx).await;
         assert_eq!(app.focus, Focus::Method);
+        app.handle_key(backtab, &finished_tx, &progress_tx).await;
+        assert_eq!(app.focus, Focus::ResponseTabs);
     }
 
     #[test]
