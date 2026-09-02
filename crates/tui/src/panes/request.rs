@@ -149,6 +149,10 @@ impl RequestPane {
     }
 
     pub fn focus_body(&mut self) {
+        if self.active == RequestTab::Path && !self.path.has_content() {
+            self.tab_bar_focused = true;
+            return;
+        }
         self.tab_bar_focused = false;
         match self.active {
             RequestTab::Headers => self.headers.focus_first_control(),
@@ -163,6 +167,10 @@ impl RequestPane {
     }
 
     pub fn focus_last_control(&mut self) {
+        if self.active == RequestTab::Path && !self.path.has_content() {
+            self.tab_bar_focused = true;
+            return;
+        }
         self.tab_bar_focused = false;
         match self.active {
             RequestTab::Headers => self.headers.focus_last_control(),
@@ -339,6 +347,14 @@ impl RequestPane {
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 self.active = RequestTab::ALL[(index + 1) % RequestTab::ALL.len()];
+                RequestPaneAction::Consumed
+            }
+            KeyCode::Tab if self.active == RequestTab::Path && !self.path.has_content() => {
+                RequestPaneAction::LeaveDown
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter
+                if self.active == RequestTab::Path && !self.path.has_content() =>
+            {
                 RequestPaneAction::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter | KeyCode::Tab => {
@@ -693,10 +709,72 @@ mod tests {
     }
 
     #[test]
+    fn empty_path_tab_skips_body_for_tab_and_keeps_directional_entry_on_tabs() {
+        let vars = Variables::new();
+        let mut pane = RequestPane::new(PathBuf::from("."));
+        pane.set_active_tab(RequestTab::Path);
+
+        for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::Enter] {
+            assert_eq!(
+                pane.handle_key(key(code), &vars),
+                RequestPaneAction::Consumed,
+                "{code:?}"
+            );
+            assert!(pane.tab_bar_focused(), "{code:?}");
+        }
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Right), &vars),
+            RequestPaneAction::Consumed
+        );
+        assert_eq!(pane.active_tab(), RequestTab::Query);
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Left), &vars),
+            RequestPaneAction::Consumed
+        );
+        assert_eq!(pane.active_tab(), RequestTab::Path);
+        assert_eq!(
+            pane.handle_key(key(KeyCode::Tab), &vars),
+            RequestPaneAction::LeaveDown
+        );
+        assert!(pane.tab_bar_focused());
+    }
+
+    #[test]
+    fn nonempty_path_tab_enters_body_with_forward_keys() {
+        let vars = Variables::new();
+        for code in [
+            KeyCode::Tab,
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+        ] {
+            let mut pane = RequestPane::new(PathBuf::from("."));
+            pane.load(&RequestModel {
+                url: "https://example.test/:id".to_owned(),
+                ..RequestModel::default()
+            });
+            pane.set_active_tab(RequestTab::Path);
+
+            assert_eq!(
+                pane.handle_key(key(code), &vars),
+                RequestPaneAction::Consumed,
+                "{code:?}"
+            );
+            assert!(!pane.tab_bar_focused(), "{code:?}");
+        }
+    }
+
+    #[test]
     fn every_request_tab_enters_at_its_first_control() {
         let vars = Variables::new();
         for tab in RequestTab::ALL {
             let mut pane = RequestPane::new(PathBuf::from("."));
+            if tab == RequestTab::Path {
+                pane.load(&RequestModel {
+                    url: "https://example.test/:id".to_owned(),
+                    ..RequestModel::default()
+                });
+            }
             pane.set_active_tab(tab);
             pane.focus_body();
             assert_eq!(
@@ -713,6 +791,12 @@ mod tests {
         let vars = Variables::new();
         for tab in RequestTab::ALL {
             let mut pane = RequestPane::new(PathBuf::from("."));
+            if tab == RequestTab::Path {
+                pane.load(&RequestModel {
+                    url: "https://example.test/:id".to_owned(),
+                    ..RequestModel::default()
+                });
+            }
             pane.set_active_tab(tab);
             pane.focus_body();
             let mut left_down = false;

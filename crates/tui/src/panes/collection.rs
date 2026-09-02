@@ -112,6 +112,13 @@ impl CollectionPane {
         }
     }
 
+    pub fn select_request(&mut self, path: &Path) {
+        if !expand_to_request(&self.collection, path, &mut self.expanded) {
+            return;
+        }
+        self.rebuild(Some(NodeKey::Request(path.to_path_buf())));
+    }
+
     pub fn target_directory(&self) -> PathBuf {
         let Some(id) = self.tree.cursor() else {
             return self.collection.path.clone();
@@ -322,6 +329,27 @@ impl CollectionPane {
             self.tree.set_cursor(*id);
         }
     }
+}
+
+fn expand_to_request(
+    collection: &Collection,
+    path: &Path,
+    expanded: &mut HashSet<PathBuf>,
+) -> bool {
+    if collection
+        .requests
+        .iter()
+        .any(|request| request.path.as_deref() == Some(path))
+    {
+        return true;
+    }
+    for child in &collection.children {
+        if expand_to_request(child, path, expanded) {
+            expanded.insert(child.path.clone());
+            return true;
+        }
+    }
+    false
 }
 
 fn has_request_in_subtree(collection: &Collection) -> bool {
@@ -682,6 +710,66 @@ mod tests {
                 parent: PathBuf::from("/tmp/apis")
             }
         );
+    }
+
+    #[test]
+    fn selecting_a_visible_request_moves_the_tree_cursor() {
+        let value = collection();
+        let expected = value.children[0].requests[0]
+            .path
+            .clone()
+            .expect("request path");
+        let mut pane = CollectionPane::new(&value);
+
+        pane.select_request(&expected);
+
+        assert_eq!(pane.selected_request(), Some(expected.as_path()));
+    }
+
+    #[test]
+    fn selecting_a_hidden_request_expands_all_ancestors() {
+        let root = PathBuf::from("/tmp/apis");
+        let parent_path = root.join("parent");
+        let nested_path = parent_path.join("nested");
+        let expected = nested_path.join("details.posting.yaml");
+        let value = Collection {
+            path: root,
+            name: "apis".to_owned(),
+            requests: Vec::new(),
+            children: vec![Collection {
+                path: parent_path.clone(),
+                name: "parent".to_owned(),
+                requests: Vec::new(),
+                children: vec![Collection {
+                    path: nested_path.clone(),
+                    name: "nested".to_owned(),
+                    requests: vec![request(
+                        &nested_path,
+                        "details.posting.yaml",
+                        HttpMethod::Get,
+                        "https://api.example.com/details",
+                        "",
+                    )],
+                    children: Vec::new(),
+                }],
+            }],
+        };
+        let mut pane = CollectionPane::new(&value);
+        pane.restore_collapsed_directories(&HashSet::from([
+            parent_path.clone(),
+            nested_path.clone(),
+        ]));
+        assert_eq!(tree_labels(&pane), vec!["parent/"]);
+
+        pane.select_request(&expected);
+
+        assert_eq!(
+            tree_labels(&pane),
+            vec!["parent/", "nested/", " GET details"]
+        );
+        assert!(pane.expanded.contains(&parent_path));
+        assert!(pane.expanded.contains(&nested_path));
+        assert_eq!(pane.selected_request(), Some(expected.as_path()));
     }
 
     #[test]
