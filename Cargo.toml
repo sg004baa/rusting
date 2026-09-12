@@ -72,7 +72,7 @@ tree-sitter = "0.26"
 tree-sitter-highlight = "0.26"
 tree-sitter-json = "0.24"
 tree-sitter-html = "0.23"
-rquickjs = { version = "0.12", features = ["bindgen", "loader"] }
+rquickjs = { version = "0.13", features = ["bindgen", "loader"] }
 tempfile = "3"
 shell-words = "1"
 arboard = { version = "3", default-features = false }
