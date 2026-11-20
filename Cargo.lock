@@ -2607,7 +2607,10 @@ dependencies = [
  "rusting-core",
  "rusting-openapi",
  "rusting-tui",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

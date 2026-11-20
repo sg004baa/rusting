@@ -30,12 +30,42 @@ rusting locate config                    # print the config file path
 rusting locate collection                # print the default collection path
 rusting import openapi.yaml              # import an OpenAPI 3.0/3.1 document
 rusting import --output ./api spec.json  # ...into a specific directory
+rusting export ./api -o api.postman_collection.json # export for Postman
 ```
 
 `--collection/-c` and `--env/-e` are global; `--env` may be repeated. `import`
 writes one request file per operation, grouped into directories by the first tag of
 each operation, rewrites every URL against `${BASE_URL}`, and drops a `<name>.env`
 file next to them holding `BASE_URL` and the auth variables the requests reference.
+
+## Export to Postman
+
+```bash
+rusting export --type postman ./api -o api.postman_collection.json
+rusting -c ./api export -o api.postman_collection.json
+```
+
+`postman` is the default export type. Without a source directory, export uses
+`--collection/-c`, then the default collection directory. A positional directory
+and `--collection` cannot be combined. Export requires an existing source
+directory and stops if any request file cannot be loaded. The output file must
+not exist. Export never overwrites files or creates parent directories.
+
+Import the JSON file into Postman as a Collection v2.1. Export converts `$NAME`
+and `${NAME}` to `{{NAME}}` and preserves `$$` as a literal `$`. Set the referenced
+variables in a Postman environment before sending requests. Export does not read
+dotenv files or the host environment, and rejects `--env`.
+
+Postman variable encoding differs from Rusting's query parameter encoding.
+Values containing reserved characters, such as `+` or `%26`, need separate
+URL-encoded query variables. Keep the original variables for headers, bodies,
+or other fields that use the unencoded values.
+
+The file includes literal credentials for the selected authentication type and
+may contain other secrets in URLs, headers, or bodies. Review it before sharing.
+Inactive authentication credentials are omitted. Script hooks, runtime options
+such as timeout, proxy, SSL, redirects, and cookie behavior, and session cookies
+are not exported. Export prints warnings for these differences.
 
 ## Collections
 
